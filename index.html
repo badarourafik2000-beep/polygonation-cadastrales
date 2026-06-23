@@ -1,0 +1,2245 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polygonation Cadastrale — Extraction PDF → GeoJSON / Shapefile</title>
+
+<!-- PDF.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!--
+  Le script du worker pdf.js est chargé ici via une balise <script> classique
+  (et non comme un Worker dédié). Cela peuple window.pdfjsWorker dans le
+  thread principal. L'environnement d'exécution des artifacts
+  (claudeusercontent.com) applique une CSP qui interdit de créer un Worker
+  ou de faire un fetch/import dynamique vers un domaine cross-origin
+  (cdnjs) -- pdf.js plante alors lors de son repli automatique en "fake
+  worker", qui tente justement un tel fetch. En pré-chargeant ce script
+  classique (autorisé par script-src), pdf.js détecte que le handler du
+  worker est déjà disponible sur le thread principal et l'utilise
+  directement, sans jamais tenter de créer un Worker ni de fetch distant.
+-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<!-- proj4js (conversion UTM -> WGS84) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.2/proj4.js"></script>
+<!-- Leaflet (carte) -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<!-- JSZip (pour générer le Shapefile zippé) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<!-- shp-write (GeoJSON -> Shapefile) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/shp-write/0.3.2/shpwrite.js"></script>
+
+<style>
+:root{
+  --bordeaux-950:#2a0a0f;
+  --bordeaux-900:#3d0f17;
+  --bordeaux-800:#5a1420;
+  --bordeaux-700:#7a1b2b;
+  --garnet-600:#9c2438;
+  --carmine-500:#b8293f;
+  --carmine-400:#d13a52;
+  --paper:#faf6f3;
+  --paper-warm:#f3ebe6;
+  --ink:#241015;
+  --ink-soft:#5c4248;
+  --line:#e3d2cf;
+  --gold:#b8924a;
+  --ok:#2f6b46;
+  --ok-bg:#e8f3ea;
+  --warn:#9c6b14;
+  --warn-bg:#fbf1dc;
+  --err:#a8273c;
+  --err-bg:#fbe9ec;
+  --radius:3px;
+  --serif: "Bookman Old Style", "URW Bookman", Georgia, "Iowan Old Style", serif;
+  --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+}
+
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+
+body{
+  font-family: var(--serif);
+  background:
+    radial-gradient(ellipse at top right, #fffaf6 0%, var(--paper) 45%),
+    var(--paper);
+  color: var(--ink);
+  line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+
+::selection{ background: var(--carmine-400); color:#fff; }
+
+/* ---------- Topographic background texture ---------- */
+.grid-texture{
+  position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 64px 64px;
+  opacity:0.35;
+  mask-image: radial-gradient(ellipse at top, black 0%, transparent 75%);
+}
+
+/* ---------- Header / Banner ---------- */
+header.banner{
+  background: linear-gradient(120deg, var(--bordeaux-950) 0%, var(--bordeaux-800) 55%, var(--garnet-600) 100%);
+  color: #f6e9e3;
+  padding: 38px 6vw 34px;
+  position:relative;
+  overflow:hidden;
+  border-bottom: 4px solid var(--gold);
+}
+header.banner::before{
+  content:"";
+  position:absolute; inset:0;
+  background-image: repeating-linear-gradient(135deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 2px, transparent 2px, transparent 22px);
+  pointer-events:none;
+}
+.banner-inner{ position:relative; max-width:1180px; margin:0 auto; display:flex; align-items:flex-end; justify-content:space-between; gap:24px; flex-wrap:wrap;}
+.banner-eyebrow{
+  font-family: var(--mono); letter-spacing:.16em; text-transform:uppercase;
+  font-size:11.5px; color: var(--gold); margin-bottom:10px; display:flex; align-items:center; gap:10px;
+}
+.banner-eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--gold);display:inline-block;}
+h1.banner-title{
+  font-size: clamp(28px, 4vw, 44px);
+  margin:0; font-weight:700; letter-spacing:-0.01em;
+  text-shadow: 0 2px 14px rgba(0,0,0,.25);
+}
+.banner-sub{
+  margin-top:10px; max-width:60ch; color:#e7c9c2; font-size:15px;
+}
+.banner-coords{
+  font-family: var(--mono); font-size:12px; color:#e9bdb0; text-align:right;
+  border-left:1px solid rgba(255,255,255,.25); padding-left:18px; line-height:1.7;
+}
+.banner-coords b{ color:var(--gold); }
+
+/* ---------- Layout ---------- */
+main{ max-width:1180px; margin: -22px auto 80px; padding: 0 6vw; position:relative; }
+
+.panel{
+  background:#fff;
+  border:1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(42,10,15,.04), 0 12px 28px -18px rgba(42,10,15,.25);
+  margin-bottom: 28px;
+  overflow:hidden;
+}
+.panel-head{
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  padding:18px 26px;
+  background: linear-gradient(180deg, var(--paper-warm), #fff);
+  border-bottom: 2px solid var(--bordeaux-700);
+}
+.panel-head h2{
+  margin:0; font-size:18px; color:var(--bordeaux-900); letter-spacing:.01em;
+  display:flex; align-items:center; gap:10px;
+}
+.panel-head h2 .num{
+  font-family:var(--mono); font-size:11px; color:#fff; background:var(--bordeaux-700);
+  border-radius:50%; width:24px; height:24px; display:inline-flex; align-items:center; justify-content:center;
+}
+.panel-body{ padding: 24px 26px 28px; }
+.panel-foot{
+  padding:14px 26px; background:var(--paper-warm); border-top:1px solid var(--line);
+  font-size:12.5px; color:var(--ink-soft); font-family:var(--mono);
+}
+
+/* ---------- Dropzone ---------- */
+.dropzone{
+  border:2px dashed var(--carmine-500);
+  border-radius: var(--radius);
+  background: repeating-linear-gradient(45deg, #fff, #fff 10px, var(--paper-warm) 10px, var(--paper-warm) 20px);
+  padding: 42px 24px;
+  text-align:center;
+  cursor:pointer;
+  transition: border-color .15s ease, background-color .15s ease;
+  position:relative;
+}
+.dropzone:hover, .dropzone.drag{
+  border-color: var(--bordeaux-900);
+  background-color: var(--paper-warm);
+}
+.dropzone input[type=file]{ position:absolute; inset:0; opacity:0; cursor:pointer; }
+.dropzone .icon{ font-size:34px; margin-bottom:10px; color:var(--bordeaux-700); }
+.dropzone .main-txt{ font-size:16px; color:var(--bordeaux-900); font-weight:700; }
+.dropzone .sub-txt{ font-size:13px; color:var(--ink-soft); margin-top:6px; }
+.dropzone .file-chip{
+  display:inline-flex; align-items:center; gap:8px; margin-top:14px; padding:6px 14px;
+  background:var(--bordeaux-900); color:#fff; border-radius:20px; font-size:12.5px; font-family:var(--mono);
+}
+
+/* ---------- Steps row ---------- */
+.steps{ display:flex; gap:0; margin: 22px 0 6px; flex-wrap:wrap; }
+.step{
+  flex:1; min-width:140px; padding:10px 14px; border-right:1px dashed var(--line);
+  font-family:var(--mono); font-size:11.5px; color: var(--ink-soft); position:relative;
+}
+.step:last-child{ border-right:none; }
+.step b{ display:block; color:var(--bordeaux-900); font-family:var(--serif); font-size:13.5px; margin-bottom:3px;}
+.step .state{ display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--line); margin-right:6px; }
+.step.active .state{ background:var(--carmine-500); box-shadow:0 0 0 3px rgba(184,41,63,.18); }
+.step.done .state{ background:var(--ok); }
+.step.error .state{ background:var(--err); }
+
+/* ---------- Buttons ---------- */
+.btn{
+  font-family:var(--serif); font-weight:700; font-size:14px;
+  padding:11px 22px; border-radius: var(--radius); border:1px solid var(--bordeaux-900);
+  background:var(--bordeaux-900); color:#fff; cursor:pointer;
+  transition: transform .08s ease, box-shadow .15s ease, background .15s ease;
+  letter-spacing:.01em;
+}
+.btn:hover{ background:var(--carmine-500); border-color:var(--carmine-500); box-shadow:0 6px 16px -6px rgba(184,41,63,.55);}
+.btn:active{ transform: translateY(1px); }
+.btn:disabled{ opacity:.42; cursor:not-allowed; box-shadow:none; }
+.btn.secondary{ background:#fff; color:var(--bordeaux-900); }
+.btn.secondary:hover{ background:var(--paper-warm); color:var(--bordeaux-900); box-shadow:none;}
+.btn.ghost{ background:transparent; color:var(--bordeaux-700); border-color:var(--line); }
+.btn.ghost:hover{ background:var(--paper-warm); box-shadow:none; }
+.btn-row{ display:flex; gap:12px; flex-wrap:wrap; margin-top:18px; }
+.btn svg{ vertical-align:-3px; margin-right:7px; }
+
+/* ---------- Form elements ---------- */
+label.field-label{
+  display:block; font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+  color:var(--bordeaux-700); margin-bottom:6px; font-weight:700;
+}
+select, input[type=text], input[type=number], textarea{
+  font-family: var(--mono); font-size:13.5px; padding:10px 12px; border:1px solid var(--line);
+  border-radius:var(--radius); background:#fff; color:var(--ink); width:100%;
+}
+select:focus, input:focus, textarea:focus{ outline:2px solid var(--carmine-400); outline-offset:1px; border-color:var(--carmine-500); }
+.field-row{ display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:16px; margin-bottom:18px; }
+.field-help{ font-size:12px; color:var(--ink-soft); margin-top:6px; }
+textarea{ font-size:12.5px; resize:vertical; min-height:120px; line-height:1.5; }
+
+/* ---------- Table editor ---------- */
+.table-wrap{ overflow-x:auto; border:1px solid var(--line); border-radius:var(--radius); }
+table.coord-table{ width:100%; border-collapse:collapse; font-family:var(--mono); font-size:13px; }
+table.coord-table thead th{
+  background: linear-gradient(180deg, var(--bordeaux-800), var(--bordeaux-900));
+  color:#fff; text-align:left; padding:10px 12px; font-weight:700; letter-spacing:.02em;
+  position:sticky; top:0; font-size:11.5px; text-transform:uppercase;
+}
+table.coord-table tbody tr:nth-child(even){ background: var(--paper-warm); }
+table.coord-table tbody tr:hover{ background:#fbeae9; }
+table.coord-table td{ padding:7px 10px; border-bottom:1px solid var(--line); }
+table.coord-table td input{ border:1px solid transparent; background:transparent; padding:4px 6px; width:100%; font-family:var(--mono); font-size:13px; border-radius:2px;}
+table.coord-table td input:focus{ border-color:var(--carmine-400); background:#fff; }
+table.coord-table td.row-actions{ text-align:center; width:36px; }
+.icon-btn{ background:none; border:none; color:var(--err); cursor:pointer; font-size:15px; padding:2px 6px; border-radius:3px; }
+.icon-btn:hover{ background:var(--err-bg); }
+.add-row-btn{ margin-top:12px; }
+
+/* ---------- Status banners ---------- */
+.status{
+  display:flex; align-items:flex-start; gap:12px; padding:14px 16px; border-radius:var(--radius);
+  font-size:13.5px; margin: 14px 0; border:1px solid;
+}
+.status.ok{ background:var(--ok-bg); border-color:#bcdfc4; color:#1d4a2c; }
+.status.warn{ background:var(--warn-bg); border-color:#ecd49b; color:#6b4c0e; }
+.status.err{ background:var(--err-bg); border-color:#eebac2; color:#7a1626; }
+.status .icon{ font-size:17px; line-height:1; flex-shrink:0; }
+
+/* ---------- Results: map + summary ---------- */
+.results-grid{ display:grid; grid-template-columns: 1.3fr 1fr; gap:22px; }
+@media (max-width: 880px){ .results-grid{ grid-template-columns:1fr; } }
+
+#map{
+  height: 460px; border-radius:var(--radius); border:1px solid var(--line);
+  box-shadow: inset 0 0 0 1px #fff;
+}
+
+.summary-card{ border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
+.summary-card .sc-head{
+  background:var(--bordeaux-900); color:#fff; padding:14px 18px; font-size:14px; font-weight:700;
+  display:flex; justify-content:space-between; align-items:center;
+}
+.sc-body{ padding:18px; }
+.metric-row{ display:flex; justify-content:space-between; align-items:baseline; gap:14px; padding:9px 0; border-bottom:1px dashed var(--line); font-size:14px; }
+.metric-row:last-child{ border-bottom:none; }
+.metric-row .label{ color:var(--ink-soft); flex-shrink:0; }
+.metric-row .value{ font-family:var(--mono); font-weight:700; color:var(--bordeaux-900); text-align:right; }
+.metric-row .value.big{ font-size:20px; }
+
+.sides-table{ width:100%; border-collapse:collapse; font-family:var(--mono); font-size:12.5px; margin-top:6px;}
+.sides-table th{ text-align:left; padding:6px 8px; color:var(--bordeaux-700); border-bottom:2px solid var(--bordeaux-700); font-size:11px; text-transform:uppercase; }
+.sides-table td{ padding:6px 8px; border-bottom:1px solid var(--line); }
+.sides-table tr:nth-child(even){ background:var(--paper-warm); }
+
+.tag{
+  display:inline-block; font-family:var(--mono); font-size:10.5px; padding:2px 8px; border-radius:10px;
+  background:var(--bordeaux-900); color:#fff; letter-spacing:.04em; text-transform:uppercase;
+}
+.tag.open{ background:var(--err); }
+
+/* ---------- Export panel ---------- */
+.export-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
+.export-card{
+  border:1px solid var(--line); border-radius:var(--radius); padding:18px; text-align:left;
+  background:#fff; transition: box-shadow .15s ease, border-color .15s ease;
+}
+.export-card:hover{ border-color:var(--carmine-500); box-shadow:0 8px 20px -14px rgba(184,41,63,.5); }
+.export-card .ec-icon{ font-size:22px; color:var(--carmine-500); margin-bottom:10px; }
+.export-card h3{ margin:0 0 6px; font-size:15px; color:var(--bordeaux-900); }
+.export-card p{ margin:0 0 14px; font-size:12.5px; color:var(--ink-soft); line-height:1.5; }
+
+/* ---------- Footer ---------- */
+footer{
+  text-align:center; padding:26px 6vw 40px; font-size:12px; color:var(--ink-soft); font-family:var(--mono);
+}
+footer .rule{ width:90px; height:2px; background:var(--gold); margin: 0 auto 14px; }
+
+/* ---------- Misc ---------- */
+.hidden{ display:none !important; }
+.spinner{
+  width:16px; height:16px; border:2.5px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%;
+  display:inline-block; animation:spin .7s linear infinite; vertical-align:-3px; margin-right:8px;
+}
+@keyframes spin{ to{ transform:rotate(360deg);} }
+
+.progress-bar{ height:6px; width:100%; background:var(--paper-warm); border-radius:6px; overflow:hidden; border:1px solid var(--line); margin-top:10px;}
+.progress-fill{ height:100%; background:linear-gradient(90deg,var(--carmine-500),var(--bordeaux-900)); width:0%; transition:width .25s ease; }
+
+code.inline{ font-family:var(--mono); background:var(--paper-warm); padding:1px 6px; border-radius:3px; font-size:12px; color:var(--bordeaux-800); }
+
+.zone-badge{
+  font-family:var(--mono); font-size:11px; background:var(--paper-warm); border:1px solid var(--line);
+  padding:4px 10px; border-radius:14px; color:var(--bordeaux-800);
+}
+
+/* ---------- File list (multi-upload) ---------- */
+.file-list{ margin-top:16px; display:flex; flex-direction:column; gap:8px; }
+.file-row{
+  display:flex; align-items:center; gap:12px; padding:10px 14px;
+  border:1px solid var(--line); border-radius:var(--radius); background:#fff;
+  font-family:var(--mono); font-size:12.5px;
+}
+.file-row .fr-icon{ font-size:16px; color:var(--bordeaux-700); flex-shrink:0; }
+.file-row .fr-name{ flex:1; color:var(--ink); font-family:var(--serif); font-size:14px; font-weight:700; }
+.file-row .fr-meta{ color:var(--ink-soft); font-size:11.5px; }
+.file-row .fr-state{
+  display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:12px; font-size:10.5px;
+  text-transform:uppercase; letter-spacing:.04em;
+}
+.file-row .fr-state.pending{ background:var(--paper-warm); color:var(--ink-soft); }
+.file-row .fr-state.working{ background:var(--warn-bg); color:var(--warn); }
+.file-row .fr-state.done{ background:var(--ok-bg); color:var(--ok); }
+.file-row .fr-state.error{ background:var(--err-bg); color:var(--err); }
+.file-row .fr-remove{ background:none; border:none; color:var(--err); cursor:pointer; font-size:15px; padding:2px 6px; border-radius:3px; flex-shrink:0; }
+.file-row .fr-remove:hover{ background:var(--err-bg); }
+.file-row .spinner-sm{
+  width:11px; height:11px; border:2px solid rgba(156,107,20,.3); border-top-color:var(--warn); border-radius:50%;
+  display:inline-block; animation:spin .7s linear infinite;
+}
+
+/* ---------- Parcel tabs ---------- */
+.parcel-tabs{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:20px; }
+.parcel-tab{
+  font-family:var(--mono); font-size:12px; padding:8px 14px; border-radius:16px;
+  border:1px solid var(--line); background:#fff; color:var(--ink-soft); cursor:pointer;
+  transition: all .12s ease; display:flex; align-items:center; gap:7px;
+}
+.parcel-tab:hover{ border-color:var(--carmine-500); color:var(--bordeaux-900); }
+.parcel-tab.active{ background:var(--bordeaux-900); border-color:var(--bordeaux-900); color:#fff; font-weight:700; }
+.parcel-tab .pt-dot{ width:6px; height:6px; border-radius:50%; background:var(--line); flex-shrink:0; }
+.parcel-tab.active .pt-dot{ background:var(--gold); }
+.parcel-tab.has-result .pt-dot{ background:var(--ok); }
+.parcel-tab.active.has-result .pt-dot{ background:var(--gold); }
+
+/* ---------- Map toolbar ---------- */
+.map-toolbar{
+  display:flex; flex-wrap:wrap; gap:18px; align-items:flex-end; margin-bottom:16px;
+  padding:14px 16px; background:var(--paper-warm); border:1px solid var(--line); border-radius:var(--radius);
+}
+.map-toolbar-group{ display:flex; flex-direction:column; gap:6px; min-width:200px; flex:1; }
+.map-toolbar-group select, .map-toolbar-group input{ font-size:13px; padding:8px 10px; }
+
+/* ---------- Map legend overlay ---------- */
+.map-legend{
+  position:absolute; bottom:10px; left:10px; z-index:1000;
+  background:rgba(42,10,15,.82); backdrop-filter: blur(2px);
+  border:1px solid rgba(255,255,255,.25); border-radius:var(--radius);
+  padding:10px 14px; font-family:var(--mono); font-size:11px; color:#fff;
+  display:flex; align-items:center; gap:10px;
+}
+.map-legend .leg-swatch{
+  width:18px; height:12px; border-radius:2px;
+  background: rgba(220,38,55,0.32); border:1.5px solid rgba(255,90,100,0.95);
+}
+
+/* ---------- All-parcels summary ---------- */
+.all-parcels-summary{ margin-top:26px; padding-top:22px; border-top:1px solid var(--line); }
+.all-parcels-summary h3{ margin:0 0 12px; font-size:15px; color:var(--bordeaux-900); }
+
+/* ---------- Export scope toggle ---------- */
+.export-scope-toggle{
+  display:flex; gap:24px; margin-top:18px; padding-top:16px; border-top:1px dashed var(--line);
+  font-size:13px; color:var(--ink-soft); flex-wrap:wrap;
+}
+.export-scope-toggle label{ display:flex; align-items:center; gap:7px; cursor:pointer; }
+.export-scope-toggle input{ width:auto; accent-color:var(--bordeaux-700); }
+
+/* ---------- Map vertex / side / area labels (Leaflet divIcons) ---------- */
+/* Texte blanc avec ombre portée forte pour rester lisible sur fond satellite,
+   conformément à la symbologie demandée (limites rouge clair, infos en blanc). */
+.vertex-label, .side-label, .area-label{ background:none !important; border:none !important; }
+.vertex-label span{
+  display:inline-block; white-space:nowrap;
+  font-family: var(--mono); font-weight:700; font-size:12.5px; color:#ffffff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.95), 0 0 5px rgba(0,0,0,.85), 0 0 1px rgba(0,0,0,1);
+  letter-spacing:.02em;
+}
+.side-label span{
+  display:inline-block; white-space:nowrap; transform: translate(-50%, -50%);
+  font-family: var(--mono); font-weight:600; font-size:11px; color:#ffffff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.95), 0 0 5px rgba(0,0,0,.85), 0 0 1px rgba(0,0,0,1);
+  background: rgba(0,0,0,0.28); padding:1px 6px; border-radius:3px;
+}
+.area-label span{
+  display:inline-block; white-space:nowrap; transform: translate(-50%, -50%); text-align:center;
+  font-family: var(--serif); font-size:12.5px; color:#ffffff; line-height:1.4;
+  text-shadow: 0 1px 3px rgba(0,0,0,.95), 0 0 6px rgba(0,0,0,.85), 0 0 1px rgba(0,0,0,1);
+}
+.area-label span b{ font-size:13px; }
+
+#map{ position:relative; }
+
+/* ---------- Aperçu image du cartouche (PDF scanné) ---------- */
+.pdf-preview-block{
+  margin: -4px 0 18px; padding:14px; border:1px solid var(--line);
+  border-radius:var(--radius); background:#fbf6ef;
+}
+.pdf-preview-frame{
+  border-radius:8px; overflow:hidden; border:1px solid var(--line);
+  background:#fff; max-height:420px; display:flex; justify-content:center;
+  cursor:zoom-in;
+}
+.pdf-preview-frame img{ width:100%; height:auto; display:block; }
+.pdf-preview-fullscreen-body{
+  flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center;
+  overflow:auto; background:#1a1212; padding:20px;
+}
+.pdf-preview-fullscreen-body img{ max-width:100%; max-height:100%; }
+
+/* ---------- Fenêtre dédiée : visualisation satellite ---------- */
+.satellite-map{
+  height: 560px; border-radius:var(--radius); border:1px solid var(--line);
+  box-shadow: inset 0 0 0 1px #fff; position:relative;
+}
+@media (max-width: 880px){ .satellite-map{ height: 420px; } }
+
+/* ---------- Overlay plein écran pour la carte satellite ---------- */
+.map-fullscreen-overlay{
+  position:fixed; inset:0; z-index:4000; background:var(--bordeaux-950);
+  display:flex; flex-direction:column;
+}
+.map-fullscreen-bar{
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  padding:14px 20px; background:linear-gradient(120deg, var(--bordeaux-950), var(--bordeaux-800));
+  border-bottom:3px solid var(--gold); flex-shrink:0;
+}
+.map-fullscreen-title{ color:#f6e9e3; font-family:var(--serif); font-weight:700; font-size:16px; }
+.map-fullscreen-bar .btn{ flex-shrink:0; }
+#satelliteMapFullscreen{ flex:1 1 auto; min-height:0; }
+</style>
+</head>
+<body>
+
+<div class="grid-texture"></div>
+
+<header class="banner">
+  <div class="banner-inner">
+    <div>
+      <div class="banner-eyebrow"><span class="dot"></span> Outil de Géomatique Cadastrale</div>
+      <h1 class="banner-title">Polygonation de Parcelle</h1>
+      <p class="banner-sub">Extraction automatique des coordonnées UTM depuis un relevé PDF, reconstitution du polygone fermé, calcul des côtés et de la superficie, export GeoJSON / Shapefile.</p>
+    </div>
+    <div class="banner-coords">
+      SYSTÈME&nbsp;: <b>UTM ZONE 31N</b><br>
+      DATUM&nbsp;: <b>WGS84</b><br>
+      RÉGION&nbsp;: <b>BÉNIN</b>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ============ PANEL 1 : IMPORT ============ -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2><span class="num">1</span> Import des levés (PDF)</h2>
+      <span class="zone-badge" id="zoneBadge">EPSG:32631 · UTM 31N</span>
+    </div>
+    <div class="panel-body">
+
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" accept="application/pdf" multiple />
+        <div class="icon">⛛</div>
+        <div class="main-txt">Déposez un ou plusieurs PDF de relevé, ou cliquez pour parcourir</div>
+        <div class="sub-txt">PDF natif (texte sélectionnable) — extraction automatique du tableau de coordonnées en coin supérieur gauche. Si le PDF est un scan, un aperçu agrandi du cartouche sera affiché pour saisie manuelle. Un PDF = une parcelle.</div>
+      </label>
+
+      <div class="file-list" id="fileList"></div>
+
+      <div class="progress-bar hidden" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
+      <div id="statusZone"></div>
+
+      <div class="btn-row">
+        <button class="btn secondary" id="manualBtn">✎ Ajouter une parcelle manuellement</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PANEL 2 : TABLE EDITOR ============ -->
+  <section class="panel hidden" id="editorPanel">
+    <div class="panel-head">
+      <h2><span class="num">2</span> Vérification des coordonnées</h2>
+      <span class="tag" id="vertexCount">0 sommets</span>
+    </div>
+    <div class="panel-body">
+
+      <div class="parcel-tabs" id="parcelTabs"></div>
+
+      <div class="field-row">
+        <div>
+          <label class="field-label">Système de coordonnées source</label>
+          <select id="epsgSelect">
+            <option value="32631">UTM Zone 31N — EPSG:32631 (WGS84, Bénin standard)</option>
+            <option value="32630">UTM Zone 30N — EPSG:32630</option>
+            <option value="4326">WGS84 Géographique (lat/lon directes) — EPSG:4326</option>
+          </select>
+          <div class="field-help">Le Bénin est intégralement couvert par la zone UTM 31N.</div>
+        </div>
+        <div>
+          <label class="field-label">Nom de la parcelle</label>
+          <input type="text" id="parcelName" placeholder="Ex : Parcelle TF 1234 — Akassato" />
+        </div>
+        <div>
+          <label class="field-label">Référence / N° de lot</label>
+          <input type="text" id="parcelRef" placeholder="Ex : Lot 12, Section B" />
+        </div>
+      </div>
+
+      <div class="pdf-preview-block hidden" id="pdfPreviewBlock">
+        <div class="field-label" style="margin-bottom:6px;">
+          Aperçu du cartouche de coordonnées (PDF scanné — lisez les valeurs ci-dessous et saisissez-les dans le tableau)
+        </div>
+        <div class="pdf-preview-frame">
+          <img id="pdfPreviewImg" alt="Aperçu du tableau de coordonnées du PDF" />
+        </div>
+        <div class="field-help">Cliquez sur l'image pour l'agrandir en plein écran si les chiffres sont difficiles à lire.</div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="coord-table" id="coordTable">
+          <thead>
+            <tr><th style="width:60px">Borne</th><th>X (Est, m)</th><th>Y (Nord, m)</th><th class="row-actions"></th></tr>
+          </thead>
+          <tbody id="coordTbody"></tbody>
+        </table>
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost add-row-btn" id="addRowBtn">+ Ajouter une borne</button>
+        <button class="btn ghost add-row-btn" id="reorderCwBtn" title="Renumérote B1, B2... en sens horaire à partir du premier point">↻ Renuméroter sens horaire</button>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn" id="computeBtn">▶ Générer la polygonation de cette parcelle</button>
+        <button class="btn secondary" id="computeAllBtn">▶▶ Générer toutes les parcelles</button>
+        <button class="btn secondary" id="pasteBtn">⎘ Coller un tableau brut</button>
+      </div>
+
+      <textarea id="pasteArea" class="hidden" placeholder="Collez ici les lignes copiées depuis le PDF ou un tableur, ex:&#10;B1  456789.12  710234.56&#10;B2  456810.30  710240.11&#10;..." style="margin-top:14px;"></textarea>
+      <div class="btn-row hidden" id="pasteBtnRow">
+        <button class="btn secondary" id="parsePasteBtn">Analyser le texte collé</button>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ PANEL 3 : RESULTS ============ -->
+  <section class="panel hidden" id="resultsPanel">
+    <div class="panel-head">
+      <h2><span class="num">3</span> Résultat — Polygonation</h2>
+      <span class="tag" id="closureTag">—</span>
+    </div>
+    <div class="panel-body">
+
+      <div class="map-toolbar">
+        <div class="map-toolbar-group">
+          <label class="field-label" style="margin-bottom:0;">Parcelle affichée</label>
+          <select id="parcelFocusSelect"></select>
+        </div>
+        <div class="map-toolbar-group">
+          <label class="field-label" style="margin-bottom:0;">Fond de carte</label>
+          <select id="basemapSelect">
+            <option value="esri">Satellite — Esri World Imagery (gratuit)</option>
+            <option value="google">Satellite — Google Maps (clé API requise)</option>
+            <option value="osm">Plan — OpenStreetMap</option>
+          </select>
+        </div>
+        <div class="map-toolbar-group hidden" id="googleKeyGroup">
+          <label class="field-label" style="margin-bottom:0;">Clé API Google Maps</label>
+          <input type="text" id="googleApiKey" placeholder="Collez votre clé API ici" />
+        </div>
+      </div>
+
+      <div class="results-grid">
+        <div id="map"></div>
+
+        <div class="summary-card">
+          <div class="sc-head">
+            <span id="summaryTitle">Synthèse de la parcelle</span>
+          </div>
+          <div class="sc-body">
+            <div class="metric-row"><span class="label">Superficie</span><span class="value big" id="metricArea">—</span></div>
+            <div class="metric-row"><span class="label">Périmètre</span><span class="value" id="metricPerimeter">—</span></div>
+            <div class="metric-row"><span class="label">Nombre de sommets</span><span class="value" id="metricVertices">—</span></div>
+            <div class="metric-row"><span class="label">Fermeture du polygone</span><span class="value" id="metricClosure">—</span></div>
+
+            <table class="sides-table">
+              <thead><tr><th>Côté</th><th>Longueur (m)</th><th>Gisement</th></tr></thead>
+              <tbody id="sidesTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="all-parcels-summary hidden" id="allParcelsSummary">
+        <h3>Récapitulatif de toutes les parcelles</h3>
+        <table class="sides-table" id="allParcelsTable">
+          <thead><tr><th>Parcelle</th><th>Référence</th><th>Sommets</th><th>Superficie</th><th>Périmètre</th></tr></thead>
+          <tbody id="allParcelsTbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PANEL 3bis : VISUALISATION SATELLITE (fenêtre dédiée) ============ -->
+  <section class="panel hidden" id="satellitePanel">
+    <div class="panel-head">
+      <h2><span class="num">⟡</span> Visualisation satellite — parcelle superposée</h2>
+      <button class="btn ghost" id="satelliteFullscreenBtn" title="Agrandir en plein écran">⛶ Plein écran</button>
+    </div>
+    <div class="panel-body">
+      <p class="field-help" style="margin:-4px 0 16px;">
+        Fenêtre dédiée à l'inspection de l'implantation réelle de la parcelle sur imagerie satellite — indépendante
+        de la carte de synthèse ci-dessus. Utile pour vérifier la cohérence du levé avec le terrain (voirie, bâti,
+        parcelles voisines).
+      </p>
+
+      <div class="map-toolbar">
+        <div class="map-toolbar-group">
+          <label class="field-label" style="margin-bottom:0;">Parcelle affichée</label>
+          <select id="satParcelFocusSelect"></select>
+        </div>
+        <div class="map-toolbar-group">
+          <label class="field-label" style="margin-bottom:0;">Fond satellite</label>
+          <select id="satBasemapSelect">
+            <option value="esri">Esri World Imagery (gratuit)</option>
+            <option value="google">Google Satellite (clé API requise)</option>
+            <option value="osm">Plan — OpenStreetMap</option>
+          </select>
+        </div>
+        <div class="map-toolbar-group hidden" id="satGoogleKeyGroup">
+          <label class="field-label" style="margin-bottom:0;">Clé API Google Maps</label>
+          <input type="text" id="satGoogleApiKey" placeholder="Collez votre clé API ici" />
+        </div>
+        <div class="map-toolbar-group" style="min-width:160px; flex:0 0 160px;">
+          <label class="field-label" style="margin-bottom:0;">Opacité du polygone</label>
+          <input type="range" id="satOpacityRange" min="0" max="100" value="35" style="padding:0; width:100%;" />
+        </div>
+      </div>
+
+      <div id="satelliteMapSlot"><div id="satelliteMap" class="satellite-map"></div></div>
+      <div class="field-help" style="margin-top:10px;">
+        Glisser pour déplacer, molette ou pincer pour zoomer. Le panneau « Plein écran » ouvre cette même carte en
+        grand pour une inspection plus confortable.
+      </div>
+    </div>
+    <div class="panel-foot">Fond satellite : Esri World Imagery / Google (selon clé fournie) — résolution variable selon la zone, à recouper avec un relevé GPS terrain en cas de doute.</div>
+  </section>
+
+  <!-- ============ PANEL 4 : EXPORT ============ -->
+  <section class="panel hidden" id="exportPanel">
+    <div class="panel-head">
+      <h2><span class="num">4</span> Export</h2>
+      <span class="zone-badge" id="exportScopeLabel">Parcelle affichée</span>
+    </div>
+    <div class="panel-body">
+      <div class="export-grid">
+        <div class="export-card">
+          <div class="ec-icon">⬡</div>
+          <h3>GeoJSON</h3>
+          <p>Polygone(s) en coordonnées géographiques (WGS84), compatible QGIS, ArcGIS, Leaflet, kepler.gl.</p>
+          <button class="btn secondary" id="exportGeoJsonBtn">↓ Télécharger .geojson</button>
+        </div>
+        <div class="export-card">
+          <div class="ec-icon">▦</div>
+          <h3>Shapefile</h3>
+          <p>Archive .zip contenant .shp / .shx / .dbf / .prj — standard SIG pour ArcGIS / QGIS.</p>
+          <button class="btn secondary" id="exportShpBtn">↓ Télécharger .zip</button>
+        </div>
+        <div class="export-card">
+          <div class="ec-icon">▤</div>
+          <h3>Tableau CSV</h3>
+          <p>Liste des bornes (X, Y), longueurs des côtés et gisements, pour rapport ou tableur.</p>
+          <button class="btn secondary" id="exportCsvBtn">↓ Télécharger .csv</button>
+        </div>
+      </div>
+      <div class="export-scope-toggle">
+        <label><input type="radio" name="exportScope" value="current" checked> Parcelle affichée uniquement</label>
+        <label><input type="radio" name="exportScope" value="all"> Toutes les parcelles (un seul fichier combiné)</label>
+      </div>
+    </div>
+    <div class="panel-foot">EPSG source : <span id="footEpsg">32631</span> · EPSG sortie GeoJSON : 4326 (WGS84) · Généré localement dans le navigateur, aucune donnée transmise à un serveur.</div>
+  </section>
+
+</main>
+
+<!-- ============ OVERLAY PLEIN ÉCRAN — carte satellite ============ -->
+<div class="map-fullscreen-overlay hidden" id="satelliteFullscreenOverlay">
+  <div class="map-fullscreen-bar">
+    <span class="map-fullscreen-title">Visualisation satellite — parcelle superposée</span>
+    <button class="btn secondary" id="satelliteFullscreenCloseBtn">✕ Fermer le plein écran</button>
+  </div>
+  <div id="satelliteMapFullscreen"></div>
+</div>
+
+<!-- ============ OVERLAY PLEIN ÉCRAN — aperçu cartouche PDF scanné ============ -->
+<div class="map-fullscreen-overlay hidden" id="pdfPreviewFullscreenOverlay">
+  <div class="map-fullscreen-bar">
+    <span class="map-fullscreen-title">Aperçu du cartouche de coordonnées</span>
+    <button class="btn secondary" id="pdfPreviewFullscreenCloseBtn">✕ Fermer le plein écran</button>
+  </div>
+  <div class="pdf-preview-fullscreen-body">
+    <img id="pdfPreviewFullscreenImg" alt="Aperçu agrandi du tableau de coordonnées du PDF" />
+  </div>
+</div>
+
+
+
+<footer>
+  <div class="rule"></div>
+  Outil de polygonation cadastrale — traitement 100% local (PDF.js / proj4) — aucune transmission de données.
+</footer>
+
+<script>
+/* ===========================================================
+   POLYGONATION CADASTRALE — logique applicative (multi-parcelles)
+   Extraction PDF (texte natif ; aperçu image en repli pour les PDF scannés)
+   -> table de coordonnées UTM -> polygone fermé, renuméroté en sens horaire
+   -> calculs (côtés, gisements, superficie) -> carte satellite -> export
+   GeoJSON / Shapefile / CSV. 100% local, aucune donnée transmise à un serveur.
+   =========================================================== */
+
+// L'environnement d'exécution des artifacts (claudeusercontent.com) applique
+// une Content-Security-Policy stricte qui interdit de créer un vrai Worker à
+// partir d'une URL cross-origin (cdnjs). Quand cette création échoue, pdf.js
+// bascule automatiquement sur son mode de repli intégré ("fake worker"), qui
+// exécute le parsing/rendu PDF directement dans le thread principal — mais ce
+// mode de repli a quand même besoin de charger le code du worker depuis
+// `workerSrc` (via une balise <script>, soumise à script-src et non à
+// worker-src/connect-src) : on laisse donc `workerSrc` pointer vers le CDN
+// plutôt que de le vider, sans quoi pdf.js échoue avec
+// 'No "GlobalWorkerOptions.workerSrc" specified.' avant même de pouvoir
+// tenter le fake worker. Un peu plus lent sur de gros documents qu'avec un
+// vrai Worker, mais entièrement fiable ici — et largement suffisant pour une
+// page de relevé de géomètre.
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+// ---- proj4 definitions ------------------------------------------------
+proj4.defs("EPSG:32631", "+proj=utm +zone=31 +datum=WGS84 +units=m +no_defs");
+proj4.defs("EPSG:32630", "+proj=utm +zone=30 +datum=WGS84 +units=m +no_defs");
+
+// =========================================================================
+// APP STATE — une parcelle par fichier PDF (ou ajoutée manuellement)
+// =========================================================================
+const state = {
+  parcels: [],
+  activeParcelId: null,
+  focusParcelId: null,
+  map: null,
+  mapLayers: [],
+  basemap: "esri",
+  basemapLayer: null,
+  googleApiKey: "",
+  // ---- Fenêtre dédiée « Visualisation satellite » (panel 3bis) ----
+  satFocusParcelId: null,
+  satMap: null,
+  satMapLayers: [],
+  satBasemap: "esri",
+  satBasemapLayer: null,
+  satGoogleApiKey: "",
+  satOpacity: 0.35,
+  satFullscreen: false,
+};
+
+let parcelSeq = 0;
+function nextParcelId() {
+  parcelSeq += 1;
+  return `parcel_${parcelSeq}`;
+}
+
+// ---- DOM shortcuts --------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+
+const dropzone = $("dropzone");
+const fileInput = $("fileInput");
+const fileListEl = $("fileList");
+const statusZone = $("statusZone");
+const progressBar = $("progressBar");
+const progressFill = $("progressFill");
+const manualBtn = $("manualBtn");
+
+const editorPanel = $("editorPanel");
+const parcelTabsEl = $("parcelTabs");
+const coordTbody = $("coordTbody");
+const vertexCountTag = $("vertexCount");
+const epsgSelect = $("epsgSelect");
+const addRowBtn = $("addRowBtn");
+const reorderCwBtn = $("reorderCwBtn");
+const computeBtn = $("computeBtn");
+const computeAllBtn = $("computeAllBtn");
+const pasteBtn = $("pasteBtn");
+const pasteArea = $("pasteArea");
+const pasteBtnRow = $("pasteBtnRow");
+const parsePasteBtn = $("parsePasteBtn");
+const parcelNameInput = $("parcelName");
+const parcelRefInput = $("parcelRef");
+
+const resultsPanel = $("resultsPanel");
+const exportPanel = $("exportPanel");
+const closureTag = $("closureTag");
+const metricArea = $("metricArea");
+const metricPerimeter = $("metricPerimeter");
+const metricVertices = $("metricVertices");
+const metricClosure = $("metricClosure");
+const sidesTbody = $("sidesTbody");
+const summaryTitle = $("summaryTitle");
+const footEpsg = $("footEpsg");
+const zoneBadge = $("zoneBadge");
+const parcelFocusSelect = $("parcelFocusSelect");
+const basemapSelect = $("basemapSelect");
+const googleKeyGroup = $("googleKeyGroup");
+const googleApiKeyInput = $("googleApiKey");
+const allParcelsSummary = $("allParcelsSummary");
+const allParcelsTbody = $("allParcelsTbody");
+const exportScopeLabel = $("exportScopeLabel");
+
+const satellitePanel = $("satellitePanel");
+const satParcelFocusSelect = $("satParcelFocusSelect");
+const satBasemapSelect = $("satBasemapSelect");
+const satGoogleKeyGroup = $("satGoogleKeyGroup");
+const satGoogleApiKeyInput = $("satGoogleApiKey");
+const satOpacityRange = $("satOpacityRange");
+const satelliteFullscreenBtn = $("satelliteFullscreenBtn");
+const satelliteFullscreenCloseBtn = $("satelliteFullscreenCloseBtn");
+const satelliteFullscreenOverlay = $("satelliteFullscreenOverlay");
+
+const pdfPreviewBlock = $("pdfPreviewBlock");
+const pdfPreviewImg = $("pdfPreviewImg");
+const pdfPreviewFullscreenOverlay = $("pdfPreviewFullscreenOverlay");
+const pdfPreviewFullscreenImg = $("pdfPreviewFullscreenImg");
+const pdfPreviewFullscreenCloseBtn = $("pdfPreviewFullscreenCloseBtn");
+
+// =========================================================================
+// STATUS HELPERS
+// =========================================================================
+function showStatus(type, iconChar, html) {
+  statusZone.innerHTML = `<div class="status ${type}"><span class="icon">${iconChar}</span><div>${html}</div></div>`;
+}
+function clearStatus() {
+  statusZone.innerHTML = "";
+}
+function setProgress(pct) {
+  progressBar.classList.remove("hidden");
+  progressFill.style.width = pct + "%";
+  if (pct >= 100) {
+    setTimeout(() => progressBar.classList.add("hidden"), 600);
+  }
+}
+
+// =========================================================================
+// FILE INPUT / DRAG & DROP (multi-fichiers)
+// =========================================================================
+["dragenter", "dragover"].forEach((evt) =>
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.add("drag");
+  })
+);
+["dragleave", "drop"].forEach((evt) =>
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("drag");
+  })
+);
+dropzone.addEventListener("drop", (e) => {
+  const files = Array.from(e.dataTransfer.files || []).filter(
+    (f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")
+  );
+  if (files.length) handleFiles(files);
+});
+fileInput.addEventListener("change", (e) => {
+  const files = Array.from(e.target.files || []);
+  if (files.length) handleFiles(files);
+  fileInput.value = "";
+});
+
+manualBtn.addEventListener("click", () => {
+  const parcel = createParcel({
+    name: `Parcelle manuelle ${state.parcels.filter((p) => p.sourceFile === null).length + 1}`,
+    sourceFile: null,
+  });
+  parcel.vertices = [
+    { id: "B1", x: "", y: "" },
+    { id: "B2", x: "", y: "" },
+    { id: "B3", x: "", y: "" },
+    { id: "B4", x: "", y: "" },
+  ];
+  state.parcels.push(parcel);
+  renderFileList();
+  setActiveParcel(parcel.id);
+  editorPanel.classList.remove("hidden");
+  editorPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+function createParcel({ name, sourceFile }) {
+  return {
+    id: nextParcelId(),
+    name: name || "Parcelle",
+    ref: "",
+    sourceFile: sourceFile || null,
+    epsg: "32631",
+    vertices: [],
+    computed: null,
+    status: "pending",
+    statusMessage: "",
+    previewImage: null,
+  };
+}
+
+async function handleFiles(files) {
+  const newParcels = [];
+  for (const file of files) {
+    const parcel = createParcel({ name: file.name.replace(/\.pdf$/i, ""), sourceFile: file });
+    state.parcels.push(parcel);
+    newParcels.push(parcel);
+  }
+  renderFileList();
+
+  for (const parcel of newParcels) {
+    await processParcelFile(parcel);
+    renderFileList();
+  }
+
+  const firstOk = newParcels.find((p) => p.status === "done" || p.status === "error");
+  if (firstOk) {
+    setActiveParcel(firstOk.id);
+    editorPanel.classList.remove("hidden");
+    editorPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+// =========================================================================
+// FILE LIST RENDERING
+// =========================================================================
+function renderFileList() {
+  fileListEl.innerHTML = "";
+  state.parcels.forEach((p) => {
+    const row = document.createElement("div");
+    row.className = "file-row";
+    const meta = p.sourceFile ? `${(p.sourceFile.size / 1024).toFixed(0)} Ko` : "saisie manuelle";
+
+    let stateClass = p.status;
+    let stateLabel = {
+      pending: "en attente",
+      working: "traitement…",
+      done: "ok",
+      error: "à vérifier",
+    }[p.status];
+
+    // Pour une parcelle manuelle, "en attente" n'a pas de sens (il n'y a pas
+    // de fichier à traiter) : on affiche plutôt si elle a déjà été calculée.
+    if (!p.sourceFile && p.status === "pending") {
+      stateClass = p.computed ? "done" : "pending";
+      stateLabel = p.computed ? "générée" : "à compléter";
+    } else if (p.computed && p.status !== "working") {
+      stateClass = "done";
+      stateLabel = "générée";
+    }
+
+    const spinner = p.status === "working" ? `<span class="spinner-sm"></span>` : "";
+    row.innerHTML = `
+      <span class="fr-icon">${p.sourceFile ? "📄" : "✎"}</span>
+      <span class="fr-name">${escapeHtml(p.name)}</span>
+      <span class="fr-meta">${escapeHtml(meta)}</span>
+      <span class="fr-state ${stateClass}">${spinner}${stateLabel}</span>
+      <button class="fr-remove" data-id="${p.id}" title="Retirer">✕</button>
+    `;
+    row.querySelector(".fr-name").addEventListener("click", () => {
+      setActiveParcel(p.id);
+      editorPanel.classList.remove("hidden");
+      editorPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    row.querySelector(".fr-remove").addEventListener("click", () => removeParcel(p.id));
+    fileListEl.appendChild(row);
+  });
+}
+
+function removeParcel(id) {
+  state.parcels = state.parcels.filter((p) => p.id !== id);
+  if (state.activeParcelId === id) {
+    state.activeParcelId = state.parcels.length ? state.parcels[0].id : null;
+  }
+  renderFileList();
+  renderParcelTabs();
+  if (state.activeParcelId) {
+    loadParcelIntoEditor(state.activeParcelId);
+  } else {
+    editorPanel.classList.add("hidden");
+  }
+  refreshFocusSelect();
+  if (!state.parcels.some((p) => p.computed)) {
+    resultsPanel.classList.add("hidden");
+    exportPanel.classList.add("hidden");
+    satellitePanel.classList.add("hidden");
+  } else {
+    renderMap();
+    refreshSatFocusSelect();
+    renderSatelliteMap();
+  }
+}
+
+// =========================================================================
+// PDF PROCESSING PIPELINE (par parcelle)
+// =========================================================================
+async function processParcelFile(parcel) {
+  const file = parcel.sourceFile;
+  if (!file) return;
+  parcel.status = "working";
+  renderFileList();
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+    const rawText = await extractNativeText(pdf);
+    const vertices = parseCoordinateTable(rawText);
+
+    if (vertices.length < 3) {
+      // Le PDF est très probablement un scan (image plein page) sans texte
+      // natif exploitable. L'OCR automatique n'est pas disponible dans cet
+      // environnement (voir note ci-dessous) : on rend plutôt un aperçu
+      // agrandi du cartouche de coordonnées pour que l'utilisateur puisse
+      // lire et saisir les bornes lui-même dans le tableau du panel 2.
+      try {
+        parcel.previewImage = await renderPreviewImage(pdf);
+      } catch (e) {
+        console.error("Rendu de l'aperçu en échec :", e);
+        parcel.previewImage = null;
+      }
+
+      parcel.status = "error";
+      parcel.statusMessage = vertices.length
+        ? `Seulement ${vertices.length} sommet(s) détecté(s) dans le texte du PDF — ce document est probablement un scan. Lisez le tableau de coordonnées sur l'aperçu ci-dessous et complétez-le manuellement.`
+        : "Aucun texte exploitable trouvé — ce PDF est probablement un scan (image). Lisez le tableau de coordonnées sur l'aperçu ci-dessous et saisissez-le manuellement.";
+      parcel.vertices = vertices.length
+        ? vertices
+        : [
+            { id: "B1", x: "", y: "" },
+            { id: "B2", x: "", y: "" },
+            { id: "B3", x: "", y: "" },
+          ];
+    } else {
+      parcel.previewImage = null;
+      parcel.status = "done";
+      parcel.statusMessage = `${vertices.length} sommets détectés dans le texte du PDF.`;
+      parcel.vertices = vertices;
+    }
+  } catch (err) {
+    console.error(err);
+    parcel.status = "error";
+    parcel.statusMessage = `Erreur : ${err.message || String(err)}`;
+    parcel.vertices = parcel.vertices.length
+      ? parcel.vertices
+      : [
+          { id: "B1", x: "", y: "" },
+          { id: "B2", x: "", y: "" },
+          { id: "B3", x: "", y: "" },
+        ];
+  }
+}
+
+// ---- Native text extraction, focused on top-left region of page(s) -------
+async function extractNativeText(pdf) {
+  let combined = "";
+  const pagesToScan = Math.min(pdf.numPages, 3);
+  for (let p = 1; p <= pagesToScan; p++) {
+    const page = await pdf.getPage(p);
+    const viewport = page.getViewport({ scale: 1 });
+    const content = await page.getTextContent();
+
+    const topLeftItems = content.items.filter((item) => {
+      const x = item.transform[4];
+      const y = item.transform[5];
+      return x < viewport.width * 0.62 && y > viewport.height * 0.35;
+    });
+
+    const itemsToUse = topLeftItems.length > 5 ? topLeftItems : content.items;
+    const rows = groupTextItemsIntoRows(itemsToUse);
+    combined += rows.join("\n") + "\n";
+  }
+  return combined;
+}
+
+function groupTextItemsIntoRows(items, yTolerance = 4) {
+  const sorted = [...items].sort((a, b) => b.transform[5] - a.transform[5]);
+  const rows = [];
+  let currentRow = [];
+  let currentY = null;
+
+  for (const item of sorted) {
+    const y = item.transform[5];
+    if (currentY === null || Math.abs(y - currentY) <= yTolerance) {
+      currentRow.push(item);
+      currentY = currentY === null ? y : currentY;
+    } else {
+      rows.push(currentRow);
+      currentRow = [item];
+      currentY = y;
+    }
+  }
+  if (currentRow.length) rows.push(currentRow);
+
+  return rows.map((row) =>
+    row
+      .sort((a, b) => a.transform[4] - b.transform[4])
+      .map((i) => i.str)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
+}
+
+// ---- Rendu d'aperçu (PDF scanné, pas de texte natif exploitable) --------
+// L'environnement d'exécution des artifacts interdit la création de Worker
+// cross-origin et restreint les requêtes réseau (CSP connect-src/worker-src),
+// ce qui rend Tesseract.js (OCR) inutilisable ici : son worker ne peut être
+// chargé ni par URL distante, ni via le blob qu'il fabrique lui-même à partir
+// d'un fetch cross-origin bloqué. Lorsque le PDF est un scan (image plein
+// page, aucun texte natif), on ne tente donc plus d'OCR : on rend la zone du
+// cartouche de coordonnées en image (canvas pdf.js, qui lui n'a pas besoin de
+// Worker) et on l'affiche à l'utilisateur pour qu'il saisisse les bornes
+// manuellement dans le tableau du panel 2, en les lisant directement sur
+// l'image agrandie.
+async function renderPdfPageToCanvas(pdf, pageNum, scale) {
+  const page = await pdf.getPage(pageNum);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext("2d");
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas;
+}
+
+// Recadre un canvas source sur une fraction (0-1) de sa largeur/hauteur, et
+// agrandit le résultat pour une lecture plus confortable du tableau de
+// coordonnées par l'utilisateur (le cartouche est généralement petit sur la
+// page complète).
+function cropCanvas(sourceCanvas, fracW, fracH, upscale) {
+  const cropW = Math.max(1, Math.floor(sourceCanvas.width * fracW));
+  const cropH = Math.max(1, Math.floor(sourceCanvas.height * fracH));
+
+  const cropCanvasEl = document.createElement("canvas");
+  cropCanvasEl.width = Math.round(cropW * upscale);
+  cropCanvasEl.height = Math.round(cropH * upscale);
+  const ctx = cropCanvasEl.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(sourceCanvas, 0, 0, cropW, cropH, 0, 0, cropCanvasEl.width, cropCanvasEl.height);
+  return cropCanvasEl;
+}
+
+// Rend une image d'aperçu (data URL) du coin supérieur gauche de la première
+// page — zone où se trouve presque toujours le cartouche de coordonnées sur
+// les relevés de géomètre — pour affichage dans le panel 2.
+async function renderPreviewImage(pdf) {
+  const sourceCanvas = await renderPdfPageToCanvas(pdf, 1, 2.5);
+  const crop = cropCanvas(sourceCanvas, 0.55, 0.32, 1.4);
+  return crop.toDataURL("image/png");
+}
+
+// =========================================================================
+// COORDINATE TABLE PARSING
+// =========================================================================
+// Le texte source peut venir soit de pdf.js (texte natif, propre), soit de
+// Tesseract OCR (texte scanné, souvent abîmé : ponctuation parasite, points
+// décimaux coupés par un espace, point décimal totalement perdu, "B2" lu
+// "B?", etc.). Le parseur ci-dessous est conçu pour être tolérant à ces
+// déformations tout en évitant de capturer des nombres présents dans
+// l'en-tête du document (téléphone, date, "WGS 84", numéro de contrat...).
+
+// Nettoie une ligne brute issue du PDF/OCR :
+// - remplace les séparateurs parasites ( | ) ] [ } { / \ _ ) par des espaces
+// - recolle un point ou une virgule décimale qui a été séparé de ses
+//   chiffres par un espace OCR, ex: "433960. 70" -> "433960.70",
+//   "705861 .01" -> "705861.01", "433950, 08" -> "433950.08"
+function cleanCoordLine(line) {
+  let s = line
+    .replace(/[|)\]\[}{\/\\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Recolle un séparateur décimal coupé par l'OCR (point, virgule, ou même
+  // un "_" — confusion fréquente du point bas de casse), avec ou sans espace
+  // autour, ex: "433960. 70" -> "433960.70", "705861 .01" -> "705861.01",
+  // "433950, 08" -> "433950.08", "705889_53" -> "705889.53".
+  s = s.replace(/(\d)\s*[.,_]\s*(\d{1,3})(?!\d)/g, "$1.$2");
+  // "_" résiduel (rare, hors contexte décimal) traité comme un simple espace.
+  s = s.replace(/_/g, " ").replace(/\s+/g, " ").trim();
+  return s;
+}
+
+// Motif principal : un label optionnel (lettres/chiffres courts, ex: B1, S2,
+// 01, B?) suivi de deux nombres décimaux d'au moins 2 chiffres avant la
+// virgule (typique de coordonnées métriques UTM ou degrés décimaux), le
+// reste de la ligne (altitude Z, commentaire...) étant ignoré.
+const COORD_ROW_REGEX =
+  /^([A-Za-z][A-Za-z0-9?]{0,4}|\d{1,3})?[\s.:\-]*(-?\d{2,7}[.,]\d{1,4})[\s,;]+(-?\d{2,7}[.,]\d{1,4})(?:[\s,;].*)?$/;
+
+// Motif de secours : le X est décimal mais le Y a perdu son point décimal en
+// OCR (devient un bloc de 6 à 9 chiffres). On réinsère un point à 2 décimales
+// du bord droit, hypothèse standard pour des coordonnées en mètres.
+const COORD_ROW_REGEX_MISSING_DOT =
+  /^([A-Za-z][A-Za-z0-9?]{0,4}|\d{1,3})?[\s.:\-]*(-?\d{2,7}[.,]\d{1,4})[\s,;]+(-?\d{6,9})(?:[\s,;].*)?$/;
+
+function tryParseCoordLine(rawLine) {
+  const cleaned = cleanCoordLine(rawLine);
+  if (!cleaned) return null;
+
+  let m = cleaned.match(COORD_ROW_REGEX);
+  if (m) {
+    const x = parseFloat(m[2].replace(",", "."));
+    const y = parseFloat(m[3].replace(",", "."));
+    if (!isNaN(x) && !isNaN(y)) return { label: (m[1] || "").trim(), x, y, raw: rawLine };
+  }
+
+  m = cleaned.match(COORD_ROW_REGEX_MISSING_DOT);
+  if (m) {
+    const x = parseFloat(m[2].replace(",", "."));
+    const yDigits = m[3];
+    const y = parseFloat(yDigits.slice(0, -2) + "." + yDigits.slice(-2));
+    if (!isNaN(x) && !isNaN(y)) return { label: (m[1] || "").trim(), x, y, raw: rawLine };
+  }
+
+  return null;
+}
+
+// Un label n'est conservé que s'il ressemble franchement à une référence de
+// borne (lettre(s) + chiffres, éventuellement vide -> sera renuméroté). Tout
+// le reste (ex: "B?" abîmé par l'OCR, label dupliqué ou absent) est remplacé
+// par une numérotation séquentielle B1, B2, B3...
+function isCleanLabel(label) {
+  return !!label && /^[A-Za-zÀ-ÿ]{1,4}\d{1,4}$/.test(label);
+}
+
+function parseCoordinateTable(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const candidates = [];
+  for (const rawLine of lines) {
+    const parsed = tryParseCoordLine(rawLine);
+    if (parsed) candidates.push(parsed);
+  }
+
+  // Déduplique les lignes identiques consécutives (parfois l'OCR ou
+  // l'extraction multi-pages répète la même ligne).
+  const deduped = [];
+  for (const c of candidates) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev.x === c.x && prev.y === c.y) continue;
+    deduped.push(c);
+  }
+
+  const ids = new Set();
+  const result = deduped.map((c, i) => {
+    let id = c.label;
+    if (!isCleanLabel(id) || ids.has(id)) {
+      id = `B${i + 1}`;
+    }
+    ids.add(id);
+    return { id, x: c.x, y: c.y };
+  });
+
+  return result;
+}
+
+// =========================================================================
+// PARCEL TABS (panel 2)
+// =========================================================================
+function renderParcelTabs() {
+  parcelTabsEl.innerHTML = "";
+  if (state.parcels.length <= 1) {
+    parcelTabsEl.classList.add("hidden");
+    return;
+  }
+  parcelTabsEl.classList.remove("hidden");
+  state.parcels.forEach((p) => {
+    const tab = document.createElement("button");
+    tab.className =
+      "parcel-tab" +
+      (p.id === state.activeParcelId ? " active" : "") +
+      (p.computed ? " has-result" : "");
+    tab.innerHTML = `<span class="pt-dot"></span>${escapeHtml(p.name || "Parcelle")}`;
+    tab.addEventListener("click", () => setActiveParcel(p.id));
+    parcelTabsEl.appendChild(tab);
+  });
+}
+
+function setActiveParcel(id) {
+  state.activeParcelId = id;
+  renderParcelTabs();
+  loadParcelIntoEditor(id);
+}
+
+function loadParcelIntoEditor(id) {
+  const parcel = getParcel(id);
+  if (!parcel) return;
+
+  parcelNameInput.value = parcel.name || "";
+  parcelRefInput.value = parcel.ref || "";
+  epsgSelect.value = parcel.epsg || "32631";
+  zoneBadge.textContent =
+    parcel.epsg === "4326" ? "EPSG:4326 · Géographique" : `EPSG:${parcel.epsg} · UTM`;
+
+  if (parcel.previewImage) {
+    pdfPreviewImg.src = parcel.previewImage;
+    pdfPreviewBlock.classList.remove("hidden");
+  } else {
+    pdfPreviewBlock.classList.add("hidden");
+  }
+
+  renderTable();
+
+  if (parcel.status === "error" && parcel.statusMessage) {
+    showStatus("warn", "⚠", escapeHtml(parcel.statusMessage));
+  } else if (parcel.status === "done" && parcel.statusMessage) {
+    showStatus("ok", "✓", escapeHtml(parcel.statusMessage));
+  } else {
+    clearStatus();
+  }
+}
+
+pdfPreviewBlock.addEventListener("click", (e) => {
+  if (!e.target.closest(".pdf-preview-frame")) return;
+  pdfPreviewFullscreenImg.src = pdfPreviewImg.src;
+  pdfPreviewFullscreenOverlay.classList.remove("hidden");
+});
+pdfPreviewFullscreenCloseBtn.addEventListener("click", () => {
+  pdfPreviewFullscreenOverlay.classList.add("hidden");
+});
+
+function getParcel(id) {
+  return state.parcels.find((p) => p.id === id) || null;
+}
+function getActiveParcel() {
+  return getParcel(state.activeParcelId);
+}
+
+// =========================================================================
+// TABLE EDITOR RENDERING
+// =========================================================================
+function renderTable() {
+  const parcel = getActiveParcel();
+  coordTbody.innerHTML = "";
+  if (!parcel) return;
+
+  parcel.vertices.forEach((v, idx) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><input type="text" data-idx="${idx}" data-field="id" value="${escapeAttr(v.id)}" /></td>
+      <td><input type="text" inputmode="decimal" data-idx="${idx}" data-field="x" value="${escapeAttr(v.x)}" placeholder="Est (X)" /></td>
+      <td><input type="text" inputmode="decimal" data-idx="${idx}" data-field="y" value="${escapeAttr(v.y)}" placeholder="Nord (Y)" /></td>
+      <td class="row-actions"><button class="icon-btn" data-idx="${idx}" title="Supprimer">✕</button></td>
+    `;
+    coordTbody.appendChild(tr);
+  });
+  vertexCountTag.textContent = `${parcel.vertices.length} sommets`;
+
+  coordTbody.querySelectorAll("input").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const idx = +e.target.dataset.idx;
+      const field = e.target.dataset.field;
+      const p = getActiveParcel();
+      if (p) p.vertices[idx][field] = e.target.value;
+    });
+  });
+  coordTbody.querySelectorAll(".icon-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const idx = +e.target.dataset.idx;
+      const p = getActiveParcel();
+      if (p) {
+        p.vertices.splice(idx, 1);
+        renderTable();
+      }
+    });
+  });
+}
+
+addRowBtn.addEventListener("click", () => {
+  const p = getActiveParcel();
+  if (!p) return;
+  p.vertices.push({ id: `B${p.vertices.length + 1}`, x: "", y: "" });
+  renderTable();
+});
+
+reorderCwBtn.addEventListener("click", () => {
+  const p = getActiveParcel();
+  if (!p) return;
+  const verts = p.vertices
+    .map((v) => ({ x: parseFloat(String(v.x).replace(",", ".")), y: parseFloat(String(v.y).replace(",", ".")) }))
+    .filter((v) => !isNaN(v.x) && !isNaN(v.y));
+  if (verts.length < 3) {
+    showStatus("warn", "⚠", "Au moins 3 sommets valides (X, Y numériques) sont nécessaires pour renuméroter.");
+    return;
+  }
+  const reordered = ensureClockwise(verts);
+  p.vertices = reordered.map((v, i) => ({ id: `B${i + 1}`, x: v.x, y: v.y }));
+  renderTable();
+  showStatus("ok", "✓", "Sommets renumérotés B1, B2… en sens horaire à partir du premier point.");
+});
+
+pasteBtn.addEventListener("click", () => {
+  pasteArea.classList.toggle("hidden");
+  pasteBtnRow.classList.toggle("hidden");
+});
+
+parsePasteBtn.addEventListener("click", () => {
+  const text = pasteArea.value;
+  if (!text.trim()) return;
+  const vertices = parseCoordinateTable(text);
+  const p = getActiveParcel();
+  if (!p) return;
+  if (vertices.length < 3) {
+    showStatus(
+      "warn",
+      "⚠",
+      "Moins de 3 sommets détectés dans le texte collé. Vérifiez le format (un point par ligne : identifiant, X, Y)."
+    );
+  } else {
+    showStatus("ok", "✓", `${vertices.length} sommets analysés depuis le texte collé.`);
+  }
+  p.vertices = vertices;
+  renderTable();
+});
+
+epsgSelect.addEventListener("change", () => {
+  const p = getActiveParcel();
+  if (!p) return;
+  p.epsg = epsgSelect.value;
+  zoneBadge.textContent =
+    p.epsg === "4326" ? "EPSG:4326 · Géographique" : `EPSG:${p.epsg} · UTM`;
+});
+
+parcelNameInput.addEventListener("input", () => {
+  const p = getActiveParcel();
+  if (!p) return;
+  p.name = parcelNameInput.value;
+  renderParcelTabs();
+  renderFileList();
+});
+parcelRefInput.addEventListener("input", () => {
+  const p = getActiveParcel();
+  if (!p) return;
+  p.ref = parcelRefInput.value;
+});
+
+// =========================================================================
+// GEOMETRY: ORIENTATION (sens horaire) + COMPUTATION
+// =========================================================================
+function signedArea(verts) {
+  let area2 = 0;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i];
+    const b = verts[(i + 1) % verts.length];
+    area2 += a.x * b.y - b.x * a.y;
+  }
+  return area2 / 2;
+}
+
+// Garantit que la liste de sommets est en sens horaire (vu en plan, X=Est,
+// Y=Nord), en conservant le premier point comme point de départ B1.
+function ensureClockwise(verts) {
+  const area = signedArea(verts);
+  if (area <= 0) {
+    return verts; // déjà horaire (ou dégénéré)
+  }
+  const [first, ...rest] = verts;
+  return [first, ...rest.reverse()];
+}
+
+function computePolygon(verts, epsg) {
+  const orientedVerts = ensureClockwise(verts.map((v) => ({ ...v }))).map((v, i) => ({
+    ...v,
+    id: `B${i + 1}`,
+  }));
+
+  const first = orientedVerts[0];
+  const last = orientedVerts[orientedVerts.length - 1];
+  const distFirstLast = Math.hypot(last.x - first.x, last.y - first.y);
+  const lastPointDuplicatesFirst = orientedVerts.length > 3 && distFirstLast < 0.01;
+
+  const ringForArea = lastPointDuplicatesFirst ? orientedVerts.slice(0, -1) : orientedVerts;
+  const ring = [...ringForArea, first];
+
+  const sides = [];
+  for (let i = 0; i < ring.length - 1; i++) {
+    const a = ring[i];
+    const b = ring[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    let bearing = (Math.atan2(dx, dy) * 180) / Math.PI;
+    if (bearing < 0) bearing += 360;
+    sides.push({ from: a.id, to: b.id, length, bearing });
+  }
+
+  const area = Math.abs(signedArea(ringForArea));
+  const perimeter = sides.reduce((s, side) => s + side.length, 0);
+
+  let latlngs;
+  if (epsg === "4326") {
+    latlngs = ringForArea.map((v) => [v.y, v.x]);
+  } else {
+    const proj = `EPSG:${epsg}`;
+    latlngs = ringForArea.map((v) => {
+      const [lon, lat] = proj4(proj, "EPSG:4326", [v.x, v.y]);
+      return [lat, lon];
+    });
+  }
+
+  return { ringForArea, sides, area, perimeter, latlngs, epsg };
+}
+
+function buildGeojsonFeature(parcel) {
+  const c = parcel.computed;
+  if (!c) return null;
+  const geojsonCoords = c.latlngs.map(([lat, lon]) => [lon, lat]);
+  geojsonCoords.push(geojsonCoords[0]);
+  return {
+    type: "Feature",
+    properties: {
+      nom: parcel.name || "Parcelle",
+      reference: parcel.ref || "",
+      superficie_m2: round2(c.area),
+      perimetre_m: round2(c.perimeter),
+      nb_sommets: c.ringForArea.length,
+      systeme_source: `EPSG:${c.epsg}`,
+    },
+    geometry: { type: "Polygon", coordinates: [geojsonCoords] },
+  };
+}
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function bearingToDMS(bearingDeg) {
+  const d = Math.floor(bearingDeg);
+  const mFloat = (bearingDeg - d) * 60;
+  const m = Math.floor(mFloat);
+  const s = Math.round((mFloat - m) * 60);
+  return `${String(d).padStart(3, "0")}°${String(m).padStart(2, "0")}'${String(s).padStart(2, "0")}"`;
+}
+
+// =========================================================================
+// COMPUTE BUTTONS
+// =========================================================================
+computeBtn.addEventListener("click", () => {
+  const parcel = getActiveParcel();
+  if (!parcel) return;
+  const ok = computeOneParcel(parcel);
+  if (!ok) return;
+
+  renderParcelTabs();
+  renderFileList();
+  refreshFocusSelect();
+  state.focusParcelId = parcel.id;
+  parcelFocusSelect.value = parcel.id;
+  renderResultsForFocus();
+  renderMap();
+
+  refreshSatFocusSelect();
+  state.satFocusParcelId = parcel.id;
+  satParcelFocusSelect.value = parcel.id;
+  renderSatelliteMap();
+
+  resultsPanel.classList.remove("hidden");
+  exportPanel.classList.remove("hidden");
+  satellitePanel.classList.remove("hidden");
+  resultsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+computeAllBtn.addEventListener("click", () => {
+  if (!state.parcels.length) return;
+  let successCount = 0;
+  let failCount = 0;
+  state.parcels.forEach((parcel) => {
+    const ok = computeOneParcel(parcel);
+    if (ok) successCount++;
+    else failCount++;
+  });
+
+  renderParcelTabs();
+  renderFileList();
+  refreshFocusSelect();
+  state.focusParcelId = "all";
+  parcelFocusSelect.value = "all";
+  renderResultsForFocus();
+  renderMap();
+
+  refreshSatFocusSelect();
+  state.satFocusParcelId = "all";
+  satParcelFocusSelect.value = "all";
+  renderSatelliteMap();
+
+  resultsPanel.classList.remove("hidden");
+  exportPanel.classList.remove("hidden");
+  satellitePanel.classList.remove("hidden");
+
+  if (failCount === 0) {
+    showStatus("ok", "✓", `${successCount} parcelle(s) générée(s) avec succès.`);
+  } else {
+    showStatus(
+      "warn",
+      "⚠",
+      `${successCount} parcelle(s) générée(s), ${failCount} en erreur (sommets insuffisants). Vérifiez les onglets concernés.`
+    );
+  }
+  resultsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+function computeOneParcel(parcel) {
+  const verts = parcel.vertices
+    .map((v) => ({
+      id: (v.id || "").trim(),
+      x: parseFloat(String(v.x).replace(",", ".")),
+      y: parseFloat(String(v.y).replace(",", ".")),
+    }))
+    .filter((v) => !isNaN(v.x) && !isNaN(v.y));
+
+  if (verts.length < 3) {
+    if (parcel.id === state.activeParcelId) {
+      showStatus(
+        "err",
+        "✕",
+        `« ${escapeHtml(parcel.name)} » : il faut au minimum 3 sommets valides pour fermer un polygone.`
+      );
+    }
+    return false;
+  }
+
+  try {
+    parcel.computed = computePolygon(verts, parcel.epsg);
+    return true;
+  } catch (err) {
+    console.error(err);
+    if (parcel.id === state.activeParcelId) {
+      showStatus("err", "✕", `Erreur de calcul pour « ${escapeHtml(parcel.name)} » : ${escapeHtml(err.message || String(err))}`);
+    }
+    return false;
+  }
+}
+
+// =========================================================================
+// FOCUS SELECT (quelle parcelle afficher sur la carte / dans la synthèse)
+// =========================================================================
+function refreshFocusSelect() {
+  const computedParcels = state.parcels.filter((p) => p.computed);
+  parcelFocusSelect.innerHTML = "";
+
+  if (computedParcels.length === 0) {
+    return;
+  }
+
+  if (computedParcels.length > 1) {
+    const optAll = document.createElement("option");
+    optAll.value = "all";
+    optAll.textContent = `Toutes les parcelles (${computedParcels.length})`;
+    parcelFocusSelect.appendChild(optAll);
+  }
+
+  computedParcels.forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name || "Parcelle";
+    parcelFocusSelect.appendChild(opt);
+  });
+
+  if (!state.focusParcelId || !["all", ...computedParcels.map((p) => p.id)].includes(state.focusParcelId)) {
+    state.focusParcelId = computedParcels.length > 1 ? "all" : computedParcels[0].id;
+  }
+  parcelFocusSelect.value = state.focusParcelId;
+}
+
+parcelFocusSelect.addEventListener("change", () => {
+  state.focusParcelId = parcelFocusSelect.value;
+  renderResultsForFocus();
+  renderMap();
+});
+
+// =========================================================================
+// RESULTS RENDERING (synthèse panel 3)
+// =========================================================================
+function renderResultsForFocus() {
+  const focus = state.focusParcelId;
+  const computedParcels = state.parcels.filter((p) => p.computed);
+
+  if (focus === "all") {
+    summaryTitle.textContent = `${computedParcels.length} parcelles`;
+    const totalArea = computedParcels.reduce((s, p) => s + p.computed.area, 0);
+    const totalPerimeter = computedParcels.reduce((s, p) => s + p.computed.perimeter, 0);
+    metricArea.textContent = `${formatNumber(totalArea)} m²  (${formatNumber(totalArea / 10000, 4)} ha)`;
+    metricPerimeter.textContent = `${formatNumber(totalPerimeter)} m (cumulé)`;
+    metricVertices.textContent = computedParcels.reduce((s, p) => s + p.computed.ringForArea.length, 0);
+    metricClosure.textContent = "Toutes géométriquement fermées";
+    closureTag.textContent = "FERMÉ";
+    closureTag.classList.remove("open");
+    sidesTbody.innerHTML = `<tr><td colspan="3" style="text-align:center; color:var(--ink-soft); padding:14px;">Sélectionnez une parcelle précise pour voir le détail des côtés.</td></tr>`;
+
+    allParcelsSummary.classList.remove("hidden");
+    allParcelsTbody.innerHTML = computedParcels
+      .map(
+        (p) => `
+        <tr>
+          <td>${escapeHtml(p.name)}</td>
+          <td>${escapeHtml(p.ref || "—")}</td>
+          <td>${p.computed.ringForArea.length}</td>
+          <td>${formatNumber(p.computed.area)} m²</td>
+          <td>${formatNumber(p.computed.perimeter)} m</td>
+        </tr>`
+      )
+      .join("");
+
+    exportScopeLabel.textContent = "Toutes les parcelles";
+    return;
+  }
+
+  const parcel = getParcel(focus);
+  if (!parcel || !parcel.computed) return;
+  const c = parcel.computed;
+
+  summaryTitle.textContent = parcel.name || "Synthèse de la parcelle";
+  metricArea.textContent = `${formatNumber(c.area)} m²  (${formatNumber(c.area / 10000, 4)} ha)`;
+  metricPerimeter.textContent = `${formatNumber(c.perimeter)} m`;
+  metricVertices.textContent = c.ringForArea.length;
+  metricClosure.textContent = "Géométriquement fermé";
+  closureTag.textContent = "FERMÉ";
+  closureTag.classList.remove("open");
+
+  sidesTbody.innerHTML = c.sides
+    .map(
+      (s) => `
+      <tr>
+        <td>${escapeHtml(s.from)} → ${escapeHtml(s.to)}</td>
+        <td>${formatNumber(s.length)} m</td>
+        <td>${bearingToDMS(s.bearing)}</td>
+      </tr>`
+    )
+    .join("");
+
+  allParcelsSummary.classList.add("hidden");
+  exportScopeLabel.textContent = parcel.name || "Parcelle affichée";
+}
+
+// =========================================================================
+// MAP RENDERING — fond satellite + symbologie rouge clair / labels blancs
+// =========================================================================
+const BASEMAPS = {
+  esri: {
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    options: {
+      attribution:
+        "Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      maxZoom: 20,
+    },
+  },
+  osm: {
+    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    options: { attribution: "© OpenStreetMap", maxZoom: 20 },
+  },
+  google: {
+    url: "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+    options: { attribution: "© Google", maxZoom: 21 },
+  },
+};
+
+basemapSelect.addEventListener("change", () => {
+  state.basemap = basemapSelect.value;
+  googleKeyGroup.classList.toggle("hidden", state.basemap !== "google");
+  if (state.map) applyBasemap(state.map, "basemapLayer", "basemap");
+});
+googleApiKeyInput.addEventListener("input", () => {
+  state.googleApiKey = googleApiKeyInput.value.trim();
+  if (state.basemap === "google" && state.map) applyBasemap(state.map, "basemapLayer", "basemap");
+});
+
+// Applique le fond de carte choisi sur une instance Leaflet donnée. Les noms
+// de clés d'état sont passés en paramètre pour que la même fonction serve la
+// carte de synthèse (state.basemap / state.basemapLayer) et la carte
+// satellite dédiée (state.satBasemap / state.satBasemapLayer).
+function applyBasemap(map, layerKey, basemapKey) {
+  if (state[layerKey]) {
+    map.removeLayer(state[layerKey]);
+    state[layerKey] = null;
+  }
+  const cfg = BASEMAPS[state[basemapKey]] || BASEMAPS.esri;
+  state[layerKey] = L.tileLayer(cfg.url, cfg.options).addTo(map);
+  if (state[layerKey].bringToBack) state[layerKey].bringToBack();
+}
+
+// =========================================================================
+// FENÊTRE DÉDIÉE — VISUALISATION SATELLITE (panel 3bis)
+// =========================================================================
+// Reprend la même logique que la carte de synthèse ci-dessus, mais dans une
+// instance Leaflet et un état entièrement séparés, pour permettre un fond de
+// carte / une parcelle / une opacité différents de la carte de synthèse, et
+// un agrandissement en plein écran sans perturber celle-ci.
+function refreshSatFocusSelect() {
+  const computedParcels = state.parcels.filter((p) => p.computed);
+  satParcelFocusSelect.innerHTML = "";
+
+  if (computedParcels.length === 0) return;
+
+  if (computedParcels.length > 1) {
+    const optAll = document.createElement("option");
+    optAll.value = "all";
+    optAll.textContent = `Toutes les parcelles (${computedParcels.length})`;
+    satParcelFocusSelect.appendChild(optAll);
+  }
+
+  computedParcels.forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name || "Parcelle";
+    satParcelFocusSelect.appendChild(opt);
+  });
+
+  if (
+    !state.satFocusParcelId ||
+    !["all", ...computedParcels.map((p) => p.id)].includes(state.satFocusParcelId)
+  ) {
+    state.satFocusParcelId = computedParcels.length > 1 ? "all" : computedParcels[0].id;
+  }
+  satParcelFocusSelect.value = state.satFocusParcelId;
+}
+
+satParcelFocusSelect.addEventListener("change", () => {
+  state.satFocusParcelId = satParcelFocusSelect.value;
+  renderSatelliteMap();
+});
+
+satBasemapSelect.addEventListener("change", () => {
+  state.satBasemap = satBasemapSelect.value;
+  satGoogleKeyGroup.classList.toggle("hidden", state.satBasemap !== "google");
+  if (state.satMap) applyBasemap(state.satMap, "satBasemapLayer", "satBasemap");
+});
+satGoogleApiKeyInput.addEventListener("input", () => {
+  state.satGoogleApiKey = satGoogleApiKeyInput.value.trim();
+  if (state.satBasemap === "google" && state.satMap) applyBasemap(state.satMap, "satBasemapLayer", "satBasemap");
+});
+satOpacityRange.addEventListener("input", () => {
+  state.satOpacity = Number(satOpacityRange.value) / 100;
+  renderSatelliteMap();
+});
+
+// La carte Leaflet dédiée n'est créée qu'une seule fois, sur le conteneur
+// visible dans le panel (#satelliteMap). Pour le mode plein écran, on ne
+// recrée pas de seconde carte Leaflet (ce qui doublerait les tuiles et l'état) :
+// on déplace simplement l'élément DOM de la carte vers l'overlay, puis on
+// le replace à sa position d'origine à la fermeture. C'est plus robuste et
+// plus léger qu'une carte Leaflet en double.
+function renderSatelliteMap() {
+  const mapEl = $("satelliteMap");
+  if (!state.satMap) {
+    state.satMap = L.map(mapEl, { scrollWheelZoom: true });
+    applyBasemap(state.satMap, "satBasemapLayer", "satBasemap");
+  }
+  drawParcelsOnMap({
+    map: state.satMap,
+    mapEl,
+    layers: state.satMapLayers,
+    focusParcelId: state.satFocusParcelId,
+    fillOpacity: state.satOpacity,
+  });
+}
+
+satelliteFullscreenBtn.addEventListener("click", () => {
+  if (!state.satMap) return;
+  const mapEl = $("satelliteMap");
+  const target = $("satelliteMapFullscreen");
+  target.appendChild(mapEl);
+  satelliteFullscreenOverlay.classList.remove("hidden");
+  state.satFullscreen = true;
+  // Le conteneur a changé de taille : Leaflet doit recalculer ses dimensions
+  // après que le navigateur ait fini de repeindre l'overlay.
+  requestAnimationFrame(() => {
+    state.satMap.invalidateSize();
+  });
+});
+
+function closeSatelliteFullscreen() {
+  if (!state.satFullscreen) return;
+  const mapEl = $("satelliteMap");
+  const slot = $("satelliteMapSlot");
+  slot.appendChild(mapEl);
+  satelliteFullscreenOverlay.classList.add("hidden");
+  state.satFullscreen = false;
+  requestAnimationFrame(() => {
+    if (state.satMap) state.satMap.invalidateSize();
+  });
+}
+satelliteFullscreenCloseBtn.addEventListener("click", closeSatelliteFullscreen);
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (state.satFullscreen) closeSatelliteFullscreen();
+  if (!pdfPreviewFullscreenOverlay.classList.contains("hidden")) {
+    pdfPreviewFullscreenOverlay.classList.add("hidden");
+  }
+});
+
+function ensureMapLegend(mapEl) {
+  let legend = mapEl.querySelector(".map-legend");
+  if (!legend) {
+    legend = document.createElement("div");
+    legend.className = "map-legend";
+    legend.innerHTML = `<span class="leg-swatch"></span> Limite de parcelle — bornes et mesures en blanc`;
+    mapEl.appendChild(legend);
+  }
+}
+
+// Dessine les polygones de parcelle(s) (+ bornes, côtés, étiquette de
+// superficie) sur une instance Leaflet donnée. Factorisé pour être partagé
+// entre la carte de synthèse (panel 3) et la fenêtre dédiée de visualisation
+// satellite (panel 3bis), qui n'ont pas la même instance de carte ni le même
+// jeu de calques mais la même symbologie.
+function drawParcelsOnMap({ map, mapEl, layers, focusParcelId, fillOpacity }) {
+  layers.forEach((layer) => map.removeLayer(layer));
+  layers.length = 0;
+
+  const computedParcels = state.parcels.filter((p) => p.computed);
+  const parcelsToShow =
+    focusParcelId === "all" ? computedParcels : computedParcels.filter((p) => p.id === focusParcelId);
+
+  if (parcelsToShow.length === 0) return;
+
+  const allBounds = [];
+
+  parcelsToShow.forEach((parcel) => {
+    const c = parcel.computed;
+    const latlngs = c.latlngs;
+    const closedLatLngs = [...latlngs, latlngs[0]];
+
+    const polygon = L.polygon(closedLatLngs, {
+      color: "#ff4d5e",
+      weight: 2.5,
+      opacity: 0.95,
+      fillColor: "#ff4d5e",
+      fillOpacity: fillOpacity,
+    }).addTo(map);
+    layers.push(polygon);
+    allBounds.push(polygon.getBounds());
+
+    c.ringForArea.forEach((v, i) => {
+      const marker = L.circleMarker(latlngs[i], {
+        radius: 4.5,
+        color: "#ffffff",
+        weight: 2,
+        fillColor: "#ff4d5e",
+        fillOpacity: 1,
+      }).addTo(map);
+      layers.push(marker);
+
+      const label = L.marker(latlngs[i], {
+        icon: L.divIcon({
+          className: "vertex-label",
+          html: `<span>${escapeHtml(v.id)}</span>`,
+          iconSize: [0, 0],
+          iconAnchor: [-8, 8],
+        }),
+        interactive: false,
+      }).addTo(map);
+      layers.push(label);
+    });
+
+    c.sides.forEach((side, i) => {
+      const a = latlngs[i];
+      const bLatLng = i === c.sides.length - 1 ? latlngs[0] : latlngs[i + 1];
+      const midLat = (a[0] + bLatLng[0]) / 2;
+      const midLon = (a[1] + bLatLng[1]) / 2;
+      const sideLabel = L.marker([midLat, midLon], {
+        icon: L.divIcon({
+          className: "side-label",
+          html: `<span>${formatNumber(side.length, 1)} m</span>`,
+          iconSize: [0, 0],
+        }),
+        interactive: false,
+      }).addTo(map);
+      layers.push(sideLabel);
+    });
+
+    const centroid = latlngs
+      .reduce((acc, [lat, lon]) => [acc[0] + lat, acc[1] + lon], [0, 0])
+      .map((v) => v / latlngs.length);
+    const areaLabel = L.marker(centroid, {
+      icon: L.divIcon({
+        className: "area-label",
+        html: `<span><b>${escapeHtml(parcel.name || "")}</b><br>${formatNumber(c.area)} m² (${formatNumber(
+          c.area / 10000,
+          2
+        )} ha)</span>`,
+        iconSize: [0, 0],
+      }),
+      interactive: false,
+    }).addTo(map);
+    layers.push(areaLabel);
+  });
+
+  if (allBounds.length) {
+    try {
+      let combined = allBounds[0];
+      for (let i = 1; i < allBounds.length; i++) {
+        if (combined && typeof combined.extend === "function") {
+          combined = combined.extend(allBounds[i]);
+        }
+      }
+      map.fitBounds(combined, { padding: [40, 40] });
+    } catch (e) {
+      console.error("Erreur lors du cadrage de la carte :", e);
+      try {
+        map.fitBounds(allBounds[0], { padding: [40, 40] });
+      } catch (e2) {
+        console.error("Repli de cadrage également en échec :", e2);
+      }
+    }
+  }
+
+  ensureMapLegend(mapEl);
+}
+
+function renderMap() {
+  const mapEl = $("map");
+  if (!state.map) {
+    state.map = L.map(mapEl, { scrollWheelZoom: true });
+    applyBasemap(state.map, "basemapLayer", "basemap");
+  }
+  drawParcelsOnMap({
+    map: state.map,
+    mapEl,
+    layers: state.mapLayers,
+    focusParcelId: state.focusParcelId,
+    fillOpacity: 0.22,
+  });
+}
+
+// =========================================================================
+// FORMATTING HELPERS
+// =========================================================================
+function formatNumber(n, decimals = 2) {
+  return Number(n).toLocaleString("fr-FR", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+function escapeAttr(str) {
+  return String(str ?? "").replace(/"/g, "&quot;");
+}
+
+// =========================================================================
+// EXPORTS
+// =========================================================================
+function getExportScope() {
+  const checked = document.querySelector('input[name="exportScope"]:checked');
+  return checked ? checked.value : "current";
+}
+
+function getExportFeatures() {
+  const scope = getExportScope();
+  if (scope === "all") {
+    return state.parcels.filter((p) => p.computed).map(buildGeojsonFeature).filter(Boolean);
+  }
+  const parcel =
+    state.focusParcelId === "all"
+      ? state.parcels.find((p) => p.computed)
+      : getParcel(state.focusParcelId);
+  if (!parcel || !parcel.computed) return [];
+  return [buildGeojsonFeature(parcel)];
+}
+
+function getExportFilenameBase() {
+  const scope = getExportScope();
+  if (scope === "all") return "toutes_parcelles";
+  const parcel =
+    state.focusParcelId === "all"
+      ? state.parcels.find((p) => p.computed)
+      : getParcel(state.focusParcelId);
+  return slug(parcel ? parcel.name : "parcelle");
+}
+
+$("exportGeoJsonBtn").addEventListener("click", () => {
+  const features = getExportFeatures();
+  if (!features.length) return;
+  const geojson = { type: "FeatureCollection", features };
+  downloadBlob(
+    JSON.stringify(geojson, null, 2),
+    `${getExportFilenameBase()}.geojson`,
+    "application/geo+json"
+  );
+});
+
+$("exportShpBtn").addEventListener("click", async () => {
+  const features = getExportFeatures();
+  if (!features.length) return;
+  const geojson = { type: "FeatureCollection", features };
+
+  const btn = $("exportShpBtn");
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span> Génération…`;
+
+  const filenameBase = getExportFilenameBase();
+  const options = {
+    folder: filenameBase,
+    types: { polygon: filenameBase },
+  };
+
+  try {
+    if (typeof shpwrite === "undefined") {
+      throw new Error("La librairie shp-write n'a pas pu être chargée (vérifiez la connexion internet).");
+    }
+    if (typeof shpwrite.zip === "function") {
+      const result = await Promise.resolve(shpwrite.zip(geojson, options));
+      let blob;
+      if (result instanceof Blob) {
+        blob = result;
+      } else if (typeof result === "string") {
+        blob = new Blob([base64ToArrayBuffer(result)], { type: "application/zip" });
+      } else if (result instanceof ArrayBuffer) {
+        blob = new Blob([result], { type: "application/zip" });
+      } else {
+        throw new Error("Format de retour inattendu de shp-write.");
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${filenameBase}_shapefile.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } else if (typeof shpwrite.download === "function") {
+      shpwrite.download(geojson, options);
+    } else {
+      throw new Error("API shp-write non reconnue.");
+    }
+  } catch (e) {
+    console.error(e);
+    showStatus(
+      "err",
+      "✕",
+      "Erreur lors de la génération du Shapefile : " +
+        escapeHtml(e.message || String(e)) +
+        ". Le GeoJSON reste disponible en alternative."
+    );
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+});
+
+$("exportCsvBtn").addEventListener("click", () => {
+  const scope = getExportScope();
+  const parcels =
+    scope === "all"
+      ? state.parcels.filter((p) => p.computed)
+      : [
+          state.focusParcelId === "all"
+            ? state.parcels.find((p) => p.computed)
+            : getParcel(state.focusParcelId),
+        ].filter(Boolean);
+
+  if (!parcels.length) return;
+
+  const rows = [];
+  parcels.forEach((parcel) => {
+    const c = parcel.computed;
+    rows.push([`=== ${parcel.name} ===`]);
+    if (parcel.ref) rows.push([`Référence`, parcel.ref]);
+    rows.push(["Borne", "X", "Y"]);
+    c.ringForArea.forEach((v) => rows.push([v.id, v.x, v.y]));
+    rows.push([]);
+    rows.push(["Côté", "Longueur (m)", "Gisement"]);
+    c.sides.forEach((s) =>
+      rows.push([`${s.from} -> ${s.to}`, round2(s.length), bearingToDMS(s.bearing)])
+    );
+    rows.push([]);
+    rows.push(["Superficie (m²)", round2(c.area)]);
+    rows.push(["Périmètre (m)", round2(c.perimeter)]);
+    rows.push([]);
+    rows.push([]);
+  });
+
+  const csv = rows.map((r) => r.join(";")).join("\n");
+  downloadBlob("\uFEFF" + csv, `${getExportFilenameBase()}.csv`, "text/csv;charset=utf-8");
+});
+
+function downloadBlob(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function base64ToArrayBuffer(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function slug(str) {
+  return (
+    String(str)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .toLowerCase() || "parcelle"
+  );
+}
+
+</script>
+</body>
+</html>
