@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Polygonation Cadastrale — Extraction PDF → GeoJSON / Shapefile</title>
 
+<!-- PWA : installation en application avec icône personnalisée -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#2a0a0f">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="icons/icon-16.png">
+<link rel="shortcut icon" href="icons/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Polygonation">
+<meta name="mobile-web-app-capable" content="yes">
+
 <!-- PDF.js -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <!-- Tesseract.js (OCR pour PDF scannés et images PNG/JPEG) -->
@@ -2340,6 +2352,17 @@ function slug(str) {
       .replace(/^_+|_+$/g, "")
       .toLowerCase() || "parcelle"
   );
+}
+
+// ---- PWA : enregistrement du service worker (installabilité) -----------
+// N'active aucune mise en cache offline (voir sw.js) : sert uniquement à
+// faire apparaître le bouton "Installer" dans Chrome/Edge.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch((e) => {
+      console.warn("Service worker non enregistré (PWA non installable, le site reste utilisable normalement) :", e);
+    });
+  });
 }
 
 </script>
