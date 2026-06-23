@@ -1264,42 +1264,51 @@ function enhanceCanvasForOcr(sourceCanvas) {
 // toujours), puis élargit progressivement si rien d'exploitable n'en sort.
 async function extractViaOcr(pdf) {
   const sourceCanvas = await renderPdfPageToCanvas(pdf, 1, 2.5);
-  const worker = await getOcrWorker((p) => setProgress(5 + Math.round(p * 65)));
+  const worker = await getOcrWorker((p) => setProgress(5 + Math.round(p * 60)));
 
-  const tightCrop = enhanceCanvasForOcr(cropCanvas(sourceCanvas, 0.5, 0.24, 1.5));
-  let text = "";
-  try {
-    const { data } = await worker.recognize(tightCrop);
-    text = data.text || "";
-  } catch (e) {
-    console.error("OCR (zone resserrée) en échec :", e);
-  }
+  // On essaie plusieurs cadrages, du plus resserré (rapide, suffisant pour
+  // un petit nombre de bornes) au plus large (page entière, nécessaire si le
+  // tableau de coordonnées comporte beaucoup de lignes et dépasse la zone
+  // resserrée). IMPORTANT : on ne s'arrête pas au premier résultat qui
+  // contient au moins 3 sommets — un tableau coupé en haut de page peut très
+  // bien donner 5 sommets "propres" alors que le document en contient 8 :
+  // on garde toujours le résultat qui donne le PLUS de sommets au total,
+  // et on ne s'arrête tôt que si un cadrage ne donne plus AUCUN sommet
+  // supplémentaire par rapport au précédent (signe que le tableau est
+  // entièrement capturé).
+  const crops = [
+    { fracW: 0.5, fracH: 0.24, upscale: 1.5, label: "zone resserrée" },
+    { fracW: 0.68, fracH: 0.45, upscale: 1.2, label: "zone large" },
+    { fracW: 0.85, fracH: 0.7, upscale: 1, label: "zone étendue" },
+    { fracW: 1, fracH: 1, upscale: 1, label: "page entière" },
+  ];
 
-  if (parseCoordinateTable(text).length < 3) {
-    setProgress(75);
-    const wideCrop = enhanceCanvasForOcr(cropCanvas(sourceCanvas, 0.68, 0.45, 1.2));
+  let bestText = "";
+  let bestCount = 0;
+
+  for (let i = 0; i < crops.length; i++) {
+    const { fracW, fracH, upscale, label } = crops[i];
+    setProgress(5 + Math.round((i / crops.length) * 70));
+    const crop = enhanceCanvasForOcr(cropCanvas(sourceCanvas, fracW, fracH, upscale));
     try {
-      const { data } = await worker.recognize(wideCrop);
-      if (parseCoordinateTable(data.text || "").length > parseCoordinateTable(text).length) {
-        text = data.text || "";
+      const { data } = await worker.recognize(crop);
+      const text = data.text || "";
+      const count = parseCoordinateTable(text).length;
+      if (count > bestCount) {
+        bestCount = count;
+        bestText = text;
+      } else if (count > 0 && count === bestCount && i > 0) {
+        // Le cadrage plus large n'apporte plus aucun sommet supplémentaire :
+        // le tableau est très probablement déjà entièrement capturé, pas
+        // besoin de continuer à élargir (gain de temps).
+        break;
       }
     } catch (e) {
-      console.error("OCR (zone large) en échec :", e);
+      console.error(`OCR (${label}) en échec :`, e);
     }
   }
 
-  if (parseCoordinateTable(text).length < 3) {
-    setProgress(85);
-    const fullCrop = enhanceCanvasForOcr(cropCanvas(sourceCanvas, 1, 1, 1));
-    try {
-      const { data } = await worker.recognize(fullCrop);
-      if (parseCoordinateTable(data.text || "").length > parseCoordinateTable(text).length) {
-        text = data.text || "";
-      }
-    } catch (e) {
-      console.error("OCR (page entière) en échec :", e);
-    }
-  }
+  let text = bestText;
 
   setProgress(100);
   return text;
