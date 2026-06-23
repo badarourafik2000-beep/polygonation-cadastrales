@@ -7,19 +7,8 @@
 
 <!-- PDF.js -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<!--
-  Le script du worker pdf.js est chargé ici via une balise <script> classique
-  (et non comme un Worker dédié). Cela peuple window.pdfjsWorker dans le
-  thread principal. L'environnement d'exécution des artifacts
-  (claudeusercontent.com) applique une CSP qui interdit de créer un Worker
-  ou de faire un fetch/import dynamique vers un domaine cross-origin
-  (cdnjs) -- pdf.js plante alors lors de son repli automatique en "fake
-  worker", qui tente justement un tel fetch. En pré-chargeant ce script
-  classique (autorisé par script-src), pdf.js détecte que le handler du
-  worker est déjà disponible sur le thread principal et l'utilise
-  directement, sans jamais tenter de créer un Worker ni de fetch distant.
--->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<!-- Tesseract.js (OCR pour PDF scannés et images PNG/JPEG) -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
 <!-- proj4js (conversion UTM -> WGS84) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.2/proj4.js"></script>
 <!-- Leaflet (carte) -->
@@ -478,10 +467,10 @@ code.inline{ font-family:var(--mono); background:var(--paper-warm); padding:1px 
     <div class="panel-body">
 
       <label class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" accept="application/pdf" multiple />
+        <input type="file" id="fileInput" accept="application/pdf,image/png,image/jpeg" multiple />
         <div class="icon">⛛</div>
-        <div class="main-txt">Déposez un ou plusieurs PDF de relevé, ou cliquez pour parcourir</div>
-        <div class="sub-txt">PDF natif (texte sélectionnable) — extraction automatique du tableau de coordonnées en coin supérieur gauche. Si le PDF est un scan, un aperçu agrandi du cartouche sera affiché pour saisie manuelle. Un PDF = une parcelle.</div>
+        <div class="main-txt">Déposez un ou plusieurs PDF / images (PNG, JPEG) de relevé, ou cliquez pour parcourir</div>
+        <div class="sub-txt">PDF natif (texte sélectionnable) — extraction automatique. PDF scanné ou image (PNG/JPEG) — lecture automatique par OCR (reconnaissance de caractères), avec aperçu agrandi et saisie manuelle de secours si l'OCR ne suffit pas. Un fichier = une parcelle.</div>
       </label>
 
       <div class="file-list" id="fileList"></div>
@@ -726,7 +715,7 @@ code.inline{ font-family:var(--mono); background:var(--paper-warm); padding:1px 
 
 <footer>
   <div class="rule"></div>
-  Outil de polygonation cadastrale — traitement 100% local (PDF.js / proj4) — aucune transmission de données.
+  Outil de polygonation cadastrale — traitement 100% local (PDF.js / Tesseract.js OCR / proj4) — aucune transmission de données.
 </footer>
 
 <script>
@@ -738,19 +727,13 @@ code.inline{ font-family:var(--mono); background:var(--paper-warm); padding:1px 
    GeoJSON / Shapefile / CSV. 100% local, aucune donnée transmise à un serveur.
    =========================================================== */
 
-// L'environnement d'exécution des artifacts (claudeusercontent.com) applique
-// une Content-Security-Policy stricte qui interdit de créer un vrai Worker à
-// partir d'une URL cross-origin (cdnjs). Quand cette création échoue, pdf.js
-// bascule automatiquement sur son mode de repli intégré ("fake worker"), qui
-// exécute le parsing/rendu PDF directement dans le thread principal — mais ce
-// mode de repli a quand même besoin de charger le code du worker depuis
-// `workerSrc` (via une balise <script>, soumise à script-src et non à
-// worker-src/connect-src) : on laisse donc `workerSrc` pointer vers le CDN
-// plutôt que de le vider, sans quoi pdf.js échoue avec
-// 'No "GlobalWorkerOptions.workerSrc" specified.' avant même de pouvoir
-// tenter le fake worker. Un peu plus lent sur de gros documents qu'avec un
-// vrai Worker, mais entièrement fiable ici — et largement suffisant pour une
-// page de relevé de géomètre.
+// Configuration standard de pdf.js : le worker tourne dans un vrai Web
+// Worker dédié (plus rapide qu'un fake worker dans le thread principal).
+// Cette configuration suppose un hébergement sans Content-Security-Policy
+// restrictive sur worker-src/connect-src (GitHub Pages, Netlify, Vercel,
+// serveur local, etc.) — contrairement à l'environnement des artifacts
+// Claude.ai (claudeusercontent.com), qui bloque la création de Worker
+// cross-origin et empêche donc l'OCR (Tesseract.js) de fonctionner.
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
@@ -881,10 +864,18 @@ function setProgress(pct) {
     dropzone.classList.remove("drag");
   })
 );
-dropzone.addEventListener("drop", (e) => {
-  const files = Array.from(e.dataTransfer.files || []).filter(
-    (f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")
+const ACCEPTED_FILE_REGEX = /\.(pdf|png|jpe?g)$/i;
+function isAcceptedFile(f) {
+  return (
+    f.type === "application/pdf" ||
+    f.type === "image/png" ||
+    f.type === "image/jpeg" ||
+    ACCEPTED_FILE_REGEX.test(f.name)
   );
+}
+
+dropzone.addEventListener("drop", (e) => {
+  const files = Array.from(e.dataTransfer.files || []).filter(isAcceptedFile);
   if (files.length) handleFiles(files);
 });
 fileInput.addEventListener("change", (e) => {
@@ -929,7 +920,7 @@ function createParcel({ name, sourceFile }) {
 async function handleFiles(files) {
   const newParcels = [];
   for (const file of files) {
-    const parcel = createParcel({ name: file.name.replace(/\.pdf$/i, ""), sourceFile: file });
+    const parcel = createParcel({ name: file.name.replace(/\.(pdf|png|jpe?g)$/i, ""), sourceFile: file });
     state.parcels.push(parcel);
     newParcels.push(parcel);
   }
@@ -976,9 +967,14 @@ function renderFileList() {
       stateLabel = "générée";
     }
 
+    let fileIcon = "✎";
+    if (p.sourceFile) {
+      fileIcon = isImageFile(p.sourceFile) ? "🖼" : "📄";
+    }
+
     const spinner = p.status === "working" ? `<span class="spinner-sm"></span>` : "";
     row.innerHTML = `
-      <span class="fr-icon">${p.sourceFile ? "📄" : "✎"}</span>
+      <span class="fr-icon">${fileIcon}</span>
       <span class="fr-name">${escapeHtml(p.name)}</span>
       <span class="fr-meta">${escapeHtml(meta)}</span>
       <span class="fr-state ${stateClass}">${spinner}${stateLabel}</span>
@@ -1021,6 +1017,25 @@ function removeParcel(id) {
 // =========================================================================
 // PDF PROCESSING PIPELINE (par parcelle)
 // =========================================================================
+function isImageFile(file) {
+  return file.type === "image/png" || file.type === "image/jpeg" || /\.(png|jpe?g)$/i.test(file.name);
+}
+
+// Bascule la parcelle en mode "à compléter manuellement" : aperçu affiché,
+// 3 lignes vides (ou les sommets partiels déjà détectés) prêtes pour saisie
+// ou collage du tableau lu par l'utilisateur ou par Claude dans le chat.
+function markParcelForManualEntry(parcel, vertices, message) {
+  parcel.status = "error";
+  parcel.statusMessage = message;
+  parcel.vertices = vertices && vertices.length
+    ? vertices
+    : [
+        { id: "B1", x: "", y: "" },
+        { id: "B2", x: "", y: "" },
+        { id: "B3", x: "", y: "" },
+      ];
+}
+
 async function processParcelFile(parcel) {
   const file = parcel.sourceFile;
   if (!file) return;
@@ -1028,18 +1043,60 @@ async function processParcelFile(parcel) {
   renderFileList();
 
   try {
+    if (isImageFile(file)) {
+      // Une image (PNG/JPEG) n'a par nature aucun texte intégré : on passe
+      // directement par l'OCR (Tesseract.js). Si l'OCR ne suffit pas à
+      // extraire au moins 3 sommets, on affiche l'aperçu agrandi pour
+      // complément manuel ou collage du tableau (lu par vous ou par Claude
+      // dans le chat).
+      parcel.previewImage = await renderImageFilePreview(file);
+
+      setProgress(5);
+      const ocrText = await extractViaOcrFromImageFile(file);
+      const vertices = parseCoordinateTable(ocrText);
+
+      if (vertices.length >= 3) {
+        parcel.status = "done";
+        parcel.statusMessage = `${vertices.length} sommets détectés via OCR.`;
+        parcel.vertices = vertices;
+        parcel.previewImage = null;
+      } else {
+        markParcelForManualEntry(
+          parcel,
+          vertices,
+          vertices.length
+            ? `Seulement ${vertices.length} sommet(s) détecté(s) par l'OCR — complétez sur l'aperçu ci-dessous (ou collez le tableau via « Coller un tableau brut »).`
+            : "L'OCR n'a rien détecté d'exploitable — lisez le tableau sur l'aperçu ci-dessous et saisissez-le (ou collez-le via « Coller un tableau brut »)."
+        );
+      }
+      return;
+    }
+
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
     const rawText = await extractNativeText(pdf);
-    const vertices = parseCoordinateTable(rawText);
+    let vertices = parseCoordinateTable(rawText);
+    let usedOcr = false;
 
     if (vertices.length < 3) {
       // Le PDF est très probablement un scan (image plein page) sans texte
-      // natif exploitable. L'OCR automatique n'est pas disponible dans cet
-      // environnement (voir note ci-dessous) : on rend plutôt un aperçu
-      // agrandi du cartouche de coordonnées pour que l'utilisateur puisse
-      // lire et saisir les bornes lui-même dans le tableau du panel 2.
+      // natif exploitable : on tente l'OCR (Tesseract.js) avant de se
+      // replier sur la saisie manuelle assistée par aperçu.
+      setProgress(5);
+      try {
+        const ocrText = await extractViaOcr(pdf);
+        const ocrVertices = parseCoordinateTable(ocrText);
+        if (ocrVertices.length > vertices.length) {
+          vertices = ocrVertices;
+          usedOcr = true;
+        }
+      } catch (e) {
+        console.error("OCR en échec :", e);
+      }
+    }
+
+    if (vertices.length < 3) {
       try {
         parcel.previewImage = await renderPreviewImage(pdf);
       } catch (e) {
@@ -1047,21 +1104,17 @@ async function processParcelFile(parcel) {
         parcel.previewImage = null;
       }
 
-      parcel.status = "error";
-      parcel.statusMessage = vertices.length
-        ? `Seulement ${vertices.length} sommet(s) détecté(s) dans le texte du PDF — ce document est probablement un scan. Lisez le tableau de coordonnées sur l'aperçu ci-dessous et complétez-le manuellement.`
-        : "Aucun texte exploitable trouvé — ce PDF est probablement un scan (image). Lisez le tableau de coordonnées sur l'aperçu ci-dessous et saisissez-le manuellement.";
-      parcel.vertices = vertices.length
-        ? vertices
-        : [
-            { id: "B1", x: "", y: "" },
-            { id: "B2", x: "", y: "" },
-            { id: "B3", x: "", y: "" },
-          ];
+      markParcelForManualEntry(
+        parcel,
+        vertices,
+        vertices.length
+          ? `Seulement ${vertices.length} sommet(s) détecté(s)${usedOcr ? " via OCR" : ""} — ce document est probablement un scan. Lisez le tableau de coordonnées sur l'aperçu ci-dessous et complétez-le (ou collez-le via « Coller un tableau brut »).`
+          : "Aucun texte exploitable trouvé, même en OCR — lisez le tableau de coordonnées sur l'aperçu ci-dessous et saisissez-le (ou collez-le via « Coller un tableau brut » si déjà transcrit)."
+      );
     } else {
       parcel.previewImage = null;
       parcel.status = "done";
-      parcel.statusMessage = `${vertices.length} sommets détectés dans le texte du PDF.`;
+      parcel.statusMessage = `${vertices.length} sommets détectés${usedOcr ? " via OCR" : " dans le texte du PDF"}.`;
       parcel.vertices = vertices;
     }
   } catch (err) {
@@ -1129,17 +1182,20 @@ function groupTextItemsIntoRows(items, yTolerance = 4) {
   );
 }
 
-// ---- Rendu d'aperçu (PDF scanné, pas de texte natif exploitable) --------
-// L'environnement d'exécution des artifacts interdit la création de Worker
-// cross-origin et restreint les requêtes réseau (CSP connect-src/worker-src),
-// ce qui rend Tesseract.js (OCR) inutilisable ici : son worker ne peut être
-// chargé ni par URL distante, ni via le blob qu'il fabrique lui-même à partir
-// d'un fetch cross-origin bloqué. Lorsque le PDF est un scan (image plein
-// page, aucun texte natif), on ne tente donc plus d'OCR : on rend la zone du
-// cartouche de coordonnées en image (canvas pdf.js, qui lui n'a pas besoin de
-// Worker) et on l'affiche à l'utilisateur pour qu'il saisisse les bornes
-// manuellement dans le tableau du panel 2, en les lisant directement sur
-// l'image agrandie.
+// ---- Rendu canvas + OCR (Tesseract.js) + aperçu de secours -------------
+// Pour un PDF scanné (image plein page, aucun texte natif) ou une image
+// PNG/JPEG, on tente d'abord l'OCR via Tesseract.js. Si l'OCR échoue ou
+// n'extrait pas un tableau de coordonnées exploitable (mauvaise qualité de
+// scan, police inhabituelle...), on se replie sur un aperçu agrandi du
+// cartouche pour saisie manuelle, ou collage du tableau si déjà transcrit.
+//
+// NOTE — hébergement : cette configuration suppose un serveur sans
+// Content-Security-Policy restrictive sur worker-src/connect-src (GitHub
+// Pages, Netlify, Vercel, serveur local...). Dans l'environnement des
+// artifacts Claude.ai (claudeusercontent.com), une CSP stricte empêche
+// Tesseract.js de créer son Worker ou de télécharger ses fichiers ; l'OCR y
+// est alors silencieusement indisponible et seul le repli "aperçu + saisie
+// manuelle" fonctionne.
 async function renderPdfPageToCanvas(pdf, pageNum, scale) {
   const page = await pdf.getPage(pageNum);
   const viewport = page.getViewport({ scale });
@@ -1176,6 +1232,162 @@ async function renderPreviewImage(pdf) {
   const sourceCanvas = await renderPdfPageToCanvas(pdf, 1, 2.5);
   const crop = cropCanvas(sourceCanvas, 0.55, 0.32, 1.4);
   return crop.toDataURL("image/png");
+}
+
+// Charge un fichier image (PNG/JPEG) déposé directement par l'utilisateur et
+// produit une data URL d'aperçu. Contrairement à un PDF de page A4 entière,
+// une photo/capture d'écran cadre généralement déjà sur la zone utile : on
+// affiche donc l'image en plein cadre (légèrement agrandie si elle est
+// petite, pour une lecture plus confortable des chiffres), sans recadrage
+// automatique sur un coin précis.
+async function renderImageFilePreview(file) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Lecture du fichier image impossible."));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("Image illisible ou format non supporté."));
+    el.src = dataUrl;
+  });
+
+  const sourceCanvas = document.createElement("canvas");
+  sourceCanvas.width = img.naturalWidth || img.width;
+  sourceCanvas.height = img.naturalHeight || img.height;
+  sourceCanvas.getContext("2d").drawImage(img, 0, 0);
+
+  // Agrandit légèrement les petites images (ex: capture d'écran basse résolution)
+  // pour une lecture plus confortable, sans dépasser une largeur raisonnable.
+  const targetWidth = 1400;
+  const upscale = sourceCanvas.width < targetWidth ? Math.min(2, targetWidth / sourceCanvas.width) : 1;
+  const finalCanvas = cropCanvas(sourceCanvas, 1, 1, upscale);
+  return finalCanvas.toDataURL("image/png");
+}
+
+// ---- OCR via Tesseract.js (worker partagé, configuration standard) -----
+let ocrWorkerPromise = null;
+function getOcrWorker(onProgress) {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = Tesseract.createWorker("fra", 1, {
+      logger: (m) => {
+        if (m.status === "recognizing text" && onProgress) onProgress(m.progress);
+      },
+    });
+  }
+  return ocrWorkerPromise;
+}
+
+// Convertit un canvas en niveaux de gris avec étirement de contraste —
+// améliore sensiblement la qualité de reconnaissance sur des scans de
+// qualité moyenne (photocopie, fax, photo de document).
+function enhanceCanvasForOcr(sourceCanvas) {
+  const ctx = sourceCanvas.getContext("2d");
+  const imgData = ctx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+  const data = imgData.data;
+  let min = 255,
+    max = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    if (g < min) min = g;
+    if (g > max) max = g;
+  }
+  const range = Math.max(1, max - min);
+  for (let i = 0; i < data.length; i += 4) {
+    const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    const stretched = Math.min(255, Math.max(0, ((g - min) / range) * 255));
+    data[i] = data[i + 1] = data[i + 2] = stretched;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return sourceCanvas;
+}
+
+// Lance l'OCR sur un PDF scanné : tente d'abord une zone resserrée sur le
+// cartouche de coordonnées (coin supérieur gauche, où il se trouve presque
+// toujours), puis élargit progressivement si rien d'exploitable n'en sort.
+async function extractViaOcr(pdf) {
+  const sourceCanvas = await renderPdfPageToCanvas(pdf, 1, 2.5);
+  const worker = await getOcrWorker((p) => setProgress(5 + Math.round(p * 65)));
+
+  const tightCrop = enhanceCanvasForOcr(cropCanvas(sourceCanvas, 0.5, 0.24, 1.5));
+  let text = "";
+  try {
+    const { data } = await worker.recognize(tightCrop);
+    text = data.text || "";
+  } catch (e) {
+    console.error("OCR (zone resserrée) en échec :", e);
+  }
+
+  if (parseCoordinateTable(text).length < 3) {
+    setProgress(75);
+    const wideCrop = enhanceCanvasForOcr(cropCanvas(sourceCanvas, 0.68, 0.45, 1.2));
+    try {
+      const { data } = await worker.recognize(wideCrop);
+      if (parseCoordinateTable(data.text || "").length > parseCoordinateTable(text).length) {
+        text = data.text || "";
+      }
+    } catch (e) {
+      console.error("OCR (zone large) en échec :", e);
+    }
+  }
+
+  if (parseCoordinateTable(text).length < 3) {
+    setProgress(85);
+    const fullCrop = enhanceCanvasForOcr(cropCanvas(sourceCanvas, 1, 1, 1));
+    try {
+      const { data } = await worker.recognize(fullCrop);
+      if (parseCoordinateTable(data.text || "").length > parseCoordinateTable(text).length) {
+        text = data.text || "";
+      }
+    } catch (e) {
+      console.error("OCR (page entière) en échec :", e);
+    }
+  }
+
+  setProgress(100);
+  return text;
+}
+
+// Lance l'OCR directement sur un fichier image (PNG/JPEG) déposé par
+// l'utilisateur : on tente d'abord l'image en plein cadre (légèrement
+// agrandie si petite), sans recadrage présupposé puisqu'une photo/capture
+// d'écran cible déjà la zone utile.
+async function extractViaOcrFromImageFile(file) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Lecture du fichier image impossible."));
+    reader.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("Image illisible ou format non supporté."));
+    el.src = dataUrl;
+  });
+
+  const sourceCanvas = document.createElement("canvas");
+  sourceCanvas.width = img.naturalWidth || img.width;
+  sourceCanvas.height = img.naturalHeight || img.height;
+  sourceCanvas.getContext("2d").drawImage(img, 0, 0);
+
+  const targetWidth = 1600;
+  const upscale = sourceCanvas.width < targetWidth ? Math.min(2, targetWidth / sourceCanvas.width) : 1;
+  const fullCrop = enhanceCanvasForOcr(cropCanvas(sourceCanvas, 1, 1, upscale));
+
+  const worker = await getOcrWorker((p) => setProgress(5 + Math.round(p * 90)));
+  let text = "";
+  try {
+    const { data } = await worker.recognize(fullCrop);
+    text = data.text || "";
+  } catch (e) {
+    console.error("OCR (image) en échec :", e);
+  }
+  setProgress(100);
+  return text;
 }
 
 // =========================================================================
