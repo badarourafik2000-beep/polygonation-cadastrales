@@ -238,11 +238,6 @@ table.coord-table td.row-actions{ text-align:center; width:36px; }
 .results-grid{ display:grid; grid-template-columns: 1.3fr 1fr; gap:22px; }
 @media (max-width: 880px){ .results-grid{ grid-template-columns:1fr; } }
 
-#map{
-  height: 460px; border-radius:var(--radius); border:1px solid var(--line);
-  box-shadow: inset 0 0 0 1px #fff;
-}
-
 .summary-card{ border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
 .summary-card .sc-head{
   background:var(--bordeaux-900); color:#fff; padding:14px 18px; font-size:14px; font-weight:700;
@@ -396,8 +391,6 @@ code.inline{ font-family:var(--mono); background:var(--paper-warm); padding:1px 
 }
 .area-label span b{ font-size:13px; }
 
-#map{ position:relative; }
-
 /* ---------- Aperçu image du cartouche (PDF scanné) ---------- */
 .pdf-preview-block{
   margin: -4px 0 18px; padding:14px; border:1px solid var(--line);
@@ -415,12 +408,12 @@ code.inline{ font-family:var(--mono); background:var(--paper-warm); padding:1px 
 }
 .pdf-preview-fullscreen-body img{ max-width:100%; max-height:100%; }
 
-/* ---------- Fenêtre dédiée : visualisation satellite ---------- */
+/* ---------- Carte satellite (fusionnée avec le résultat) ---------- */
 .satellite-map{
-  height: 560px; border-radius:var(--radius); border:1px solid var(--line);
+  height: 460px; border-radius:var(--radius); border:1px solid var(--line);
   box-shadow: inset 0 0 0 1px #fff; position:relative;
 }
-@media (max-width: 880px){ .satellite-map{ height: 420px; } }
+@media (max-width: 880px){ .satellite-map{ height: 380px; } }
 
 /* ---------- Overlay plein écran pour la carte satellite ---------- */
 .map-fullscreen-overlay{
@@ -552,73 +545,19 @@ code.inline{ font-family:var(--mono); background:var(--paper-warm); padding:1px 
   </section>
 
   <!-- ============ PANEL 3 : RESULTS ============ -->
-  <section class="panel hidden" id="resultsPanel">
-    <div class="panel-head">
-      <h2><span class="num">3</span> Résultat — Polygonation</h2>
-      <span class="tag" id="closureTag">—</span>
-    </div>
-    <div class="panel-body">
-
-      <div class="map-toolbar">
-        <div class="map-toolbar-group">
-          <label class="field-label" style="margin-bottom:0;">Parcelle affichée</label>
-          <select id="parcelFocusSelect"></select>
-        </div>
-        <div class="map-toolbar-group">
-          <label class="field-label" style="margin-bottom:0;">Fond de carte</label>
-          <select id="basemapSelect">
-            <option value="esri">Satellite — Esri World Imagery (gratuit)</option>
-            <option value="google">Satellite — Google Maps (clé API requise)</option>
-            <option value="osm">Plan — OpenStreetMap</option>
-          </select>
-        </div>
-        <div class="map-toolbar-group hidden" id="googleKeyGroup">
-          <label class="field-label" style="margin-bottom:0;">Clé API Google Maps</label>
-          <input type="text" id="googleApiKey" placeholder="Collez votre clé API ici" />
-        </div>
-      </div>
-
-      <div class="results-grid">
-        <div id="map"></div>
-
-        <div class="summary-card">
-          <div class="sc-head">
-            <span id="summaryTitle">Synthèse de la parcelle</span>
-          </div>
-          <div class="sc-body">
-            <div class="metric-row"><span class="label">Superficie</span><span class="value big" id="metricArea">—</span></div>
-            <div class="metric-row"><span class="label">Périmètre</span><span class="value" id="metricPerimeter">—</span></div>
-            <div class="metric-row"><span class="label">Nombre de sommets</span><span class="value" id="metricVertices">—</span></div>
-            <div class="metric-row"><span class="label">Fermeture du polygone</span><span class="value" id="metricClosure">—</span></div>
-
-            <table class="sides-table">
-              <thead><tr><th>Côté</th><th>Longueur (m)</th><th>Gisement</th></tr></thead>
-              <tbody id="sidesTbody"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <div class="all-parcels-summary hidden" id="allParcelsSummary">
-        <h3>Récapitulatif de toutes les parcelles</h3>
-        <table class="sides-table" id="allParcelsTable">
-          <thead><tr><th>Parcelle</th><th>Référence</th><th>Sommets</th><th>Superficie</th><th>Périmètre</th></tr></thead>
-          <tbody id="allParcelsTbody"></tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ PANEL 3bis : VISUALISATION SATELLITE (fenêtre dédiée) ============ -->
+  <!-- ============ PANEL 3 : VISUALISATION SATELLITE + RÉSULTAT ============ -->
   <section class="panel hidden" id="satellitePanel">
     <div class="panel-head">
-      <h2><span class="num">⟡</span> Visualisation satellite — parcelle superposée</h2>
-      <button class="btn ghost" id="satelliteFullscreenBtn" title="Agrandir en plein écran">⛶ Plein écran</button>
+      <h2><span class="num">3</span> Visualisation satellite — parcelle superposée</h2>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span class="tag" id="closureTag">—</span>
+        <button class="btn ghost" id="satelliteFullscreenBtn" title="Agrandir en plein écran">⛶ Plein écran</button>
+      </div>
     </div>
     <div class="panel-body">
       <p class="field-help" style="margin:-4px 0 16px;">
-        Fenêtre dédiée à l'inspection de l'implantation réelle de la parcelle sur imagerie satellite — indépendante
-        de la carte de synthèse ci-dessus. Utile pour vérifier la cohérence du levé avec le terrain (voirie, bâti,
+        Inspection de l'implantation réelle de la parcelle sur imagerie satellite, avec ses informations attributaires
+        (superficie, périmètre, côtés). Utile pour vérifier la cohérence du levé avec le terrain (voirie, bâti,
         parcelles voisines).
       </p>
 
@@ -645,10 +584,38 @@ code.inline{ font-family:var(--mono); background:var(--paper-warm); padding:1px 
         </div>
       </div>
 
-      <div id="satelliteMapSlot"><div id="satelliteMap" class="satellite-map"></div></div>
+      <div class="results-grid">
+        <div id="satelliteMapSlot"><div id="satelliteMap" class="satellite-map"></div></div>
+
+        <div class="summary-card">
+          <div class="sc-head">
+            <span id="summaryTitle">Synthèse de la parcelle</span>
+          </div>
+          <div class="sc-body">
+            <div class="metric-row"><span class="label">Superficie</span><span class="value big" id="metricArea">—</span></div>
+            <div class="metric-row"><span class="label">Périmètre</span><span class="value" id="metricPerimeter">—</span></div>
+            <div class="metric-row"><span class="label">Nombre de sommets</span><span class="value" id="metricVertices">—</span></div>
+            <div class="metric-row"><span class="label">Fermeture du polygone</span><span class="value" id="metricClosure">—</span></div>
+
+            <table class="sides-table">
+              <thead><tr><th>Côté</th><th>Longueur (m)</th><th>Gisement</th></tr></thead>
+              <tbody id="sidesTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <div class="field-help" style="margin-top:10px;">
-        Glisser pour déplacer, molette ou pincer pour zoomer. Le panneau « Plein écran » ouvre cette même carte en
-        grand pour une inspection plus confortable.
+        Glisser pour déplacer, molette ou pincer pour zoomer. Le panneau « Plein écran » ouvre la carte en grand pour
+        une inspection plus confortable.
+      </div>
+
+      <div class="all-parcels-summary hidden" id="allParcelsSummary">
+        <h3>Récapitulatif de toutes les parcelles</h3>
+        <table class="sides-table" id="allParcelsTable">
+          <thead><tr><th>Parcelle</th><th>Référence</th><th>Sommets</th><th>Superficie</th><th>Périmètre</th></tr></thead>
+          <tbody id="allParcelsTbody"></tbody>
+        </table>
       </div>
     </div>
     <div class="panel-foot">Fond satellite : Esri World Imagery / Google (selon clé fournie) — résolution variable selon la zone, à recouper avec un relevé GPS terrain en cas de doute.</div>
@@ -747,14 +714,8 @@ proj4.defs("EPSG:32630", "+proj=utm +zone=30 +datum=WGS84 +units=m +no_defs");
 const state = {
   parcels: [],
   activeParcelId: null,
+  // ---- Carte satellite + résultat (panel 3, fusionné) ----
   focusParcelId: null,
-  map: null,
-  mapLayers: [],
-  basemap: "esri",
-  basemapLayer: null,
-  googleApiKey: "",
-  // ---- Fenêtre dédiée « Visualisation satellite » (panel 3bis) ----
-  satFocusParcelId: null,
   satMap: null,
   satMapLayers: [],
   satBasemap: "esri",
@@ -797,7 +758,6 @@ const parsePasteBtn = $("parsePasteBtn");
 const parcelNameInput = $("parcelName");
 const parcelRefInput = $("parcelRef");
 
-const resultsPanel = $("resultsPanel");
 const exportPanel = $("exportPanel");
 const closureTag = $("closureTag");
 const metricArea = $("metricArea");
@@ -808,10 +768,6 @@ const sidesTbody = $("sidesTbody");
 const summaryTitle = $("summaryTitle");
 const footEpsg = $("footEpsg");
 const zoneBadge = $("zoneBadge");
-const parcelFocusSelect = $("parcelFocusSelect");
-const basemapSelect = $("basemapSelect");
-const googleKeyGroup = $("googleKeyGroup");
-const googleApiKeyInput = $("googleApiKey");
 const allParcelsSummary = $("allParcelsSummary");
 const allParcelsTbody = $("allParcelsTbody");
 const exportScopeLabel = $("exportScopeLabel");
@@ -1002,14 +958,12 @@ function removeParcel(id) {
   } else {
     editorPanel.classList.add("hidden");
   }
-  refreshFocusSelect();
   if (!state.parcels.some((p) => p.computed)) {
-    resultsPanel.classList.add("hidden");
     exportPanel.classList.add("hidden");
     satellitePanel.classList.add("hidden");
   } else {
-    renderMap();
     refreshSatFocusSelect();
+    renderResultsForFocus();
     renderSatelliteMap();
   }
 }
@@ -1786,21 +1740,16 @@ computeBtn.addEventListener("click", () => {
 
   renderParcelTabs();
   renderFileList();
-  refreshFocusSelect();
-  state.focusParcelId = parcel.id;
-  parcelFocusSelect.value = parcel.id;
-  renderResultsForFocus();
-  renderMap();
 
   refreshSatFocusSelect();
-  state.satFocusParcelId = parcel.id;
+  state.focusParcelId = parcel.id;
   satParcelFocusSelect.value = parcel.id;
+  renderResultsForFocus();
   renderSatelliteMap();
 
-  resultsPanel.classList.remove("hidden");
   exportPanel.classList.remove("hidden");
   satellitePanel.classList.remove("hidden");
-  resultsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  satellitePanel.scrollIntoView({ behavior: "smooth", block: "start" });
 });
 
 computeAllBtn.addEventListener("click", () => {
@@ -1815,18 +1764,13 @@ computeAllBtn.addEventListener("click", () => {
 
   renderParcelTabs();
   renderFileList();
-  refreshFocusSelect();
-  state.focusParcelId = "all";
-  parcelFocusSelect.value = "all";
-  renderResultsForFocus();
-  renderMap();
 
   refreshSatFocusSelect();
-  state.satFocusParcelId = "all";
+  state.focusParcelId = "all";
   satParcelFocusSelect.value = "all";
+  renderResultsForFocus();
   renderSatelliteMap();
 
-  resultsPanel.classList.remove("hidden");
   exportPanel.classList.remove("hidden");
   satellitePanel.classList.remove("hidden");
 
@@ -1839,7 +1783,7 @@ computeAllBtn.addEventListener("click", () => {
       `${successCount} parcelle(s) générée(s), ${failCount} en erreur (sommets insuffisants). Vérifiez les onglets concernés.`
     );
   }
-  resultsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  satellitePanel.scrollIntoView({ behavior: "smooth", block: "start" });
 });
 
 function computeOneParcel(parcel) {
@@ -1877,40 +1821,6 @@ function computeOneParcel(parcel) {
 // =========================================================================
 // FOCUS SELECT (quelle parcelle afficher sur la carte / dans la synthèse)
 // =========================================================================
-function refreshFocusSelect() {
-  const computedParcels = state.parcels.filter((p) => p.computed);
-  parcelFocusSelect.innerHTML = "";
-
-  if (computedParcels.length === 0) {
-    return;
-  }
-
-  if (computedParcels.length > 1) {
-    const optAll = document.createElement("option");
-    optAll.value = "all";
-    optAll.textContent = `Toutes les parcelles (${computedParcels.length})`;
-    parcelFocusSelect.appendChild(optAll);
-  }
-
-  computedParcels.forEach((p) => {
-    const opt = document.createElement("option");
-    opt.value = p.id;
-    opt.textContent = p.name || "Parcelle";
-    parcelFocusSelect.appendChild(opt);
-  });
-
-  if (!state.focusParcelId || !["all", ...computedParcels.map((p) => p.id)].includes(state.focusParcelId)) {
-    state.focusParcelId = computedParcels.length > 1 ? "all" : computedParcels[0].id;
-  }
-  parcelFocusSelect.value = state.focusParcelId;
-}
-
-parcelFocusSelect.addEventListener("change", () => {
-  state.focusParcelId = parcelFocusSelect.value;
-  renderResultsForFocus();
-  renderMap();
-});
-
 // =========================================================================
 // RESULTS RENDERING (synthèse panel 3)
 // =========================================================================
@@ -1997,20 +1907,8 @@ const BASEMAPS = {
   },
 };
 
-basemapSelect.addEventListener("change", () => {
-  state.basemap = basemapSelect.value;
-  googleKeyGroup.classList.toggle("hidden", state.basemap !== "google");
-  if (state.map) applyBasemap(state.map, "basemapLayer", "basemap");
-});
-googleApiKeyInput.addEventListener("input", () => {
-  state.googleApiKey = googleApiKeyInput.value.trim();
-  if (state.basemap === "google" && state.map) applyBasemap(state.map, "basemapLayer", "basemap");
-});
-
-// Applique le fond de carte choisi sur une instance Leaflet donnée. Les noms
-// de clés d'état sont passés en paramètre pour que la même fonction serve la
-// carte de synthèse (state.basemap / state.basemapLayer) et la carte
-// satellite dédiée (state.satBasemap / state.satBasemapLayer).
+// Applique le fond de carte choisi sur l'instance Leaflet de la carte
+// satellite (state.satBasemap / state.satBasemapLayer).
 function applyBasemap(map, layerKey, basemapKey) {
   if (state[layerKey]) {
     map.removeLayer(state[layerKey]);
@@ -2022,12 +1920,10 @@ function applyBasemap(map, layerKey, basemapKey) {
 }
 
 // =========================================================================
-// FENÊTRE DÉDIÉE — VISUALISATION SATELLITE (panel 3bis)
+// VISUALISATION SATELLITE + RÉSULTAT (panel 3, fusionné)
 // =========================================================================
-// Reprend la même logique que la carte de synthèse ci-dessus, mais dans une
-// instance Leaflet et un état entièrement séparés, pour permettre un fond de
-// carte / une parcelle / une opacité différents de la carte de synthèse, et
-// un agrandissement en plein écran sans perturber celle-ci.
+// Carte satellite Leaflet avec superposition du polygone, couplée aux
+// métriques attributaires (superficie, périmètre, côtés) du panneau unique.
 function refreshSatFocusSelect() {
   const computedParcels = state.parcels.filter((p) => p.computed);
   satParcelFocusSelect.innerHTML = "";
@@ -2049,16 +1945,17 @@ function refreshSatFocusSelect() {
   });
 
   if (
-    !state.satFocusParcelId ||
-    !["all", ...computedParcels.map((p) => p.id)].includes(state.satFocusParcelId)
+    !state.focusParcelId ||
+    !["all", ...computedParcels.map((p) => p.id)].includes(state.focusParcelId)
   ) {
-    state.satFocusParcelId = computedParcels.length > 1 ? "all" : computedParcels[0].id;
+    state.focusParcelId = computedParcels.length > 1 ? "all" : computedParcels[0].id;
   }
-  satParcelFocusSelect.value = state.satFocusParcelId;
+  satParcelFocusSelect.value = state.focusParcelId;
 }
 
 satParcelFocusSelect.addEventListener("change", () => {
-  state.satFocusParcelId = satParcelFocusSelect.value;
+  state.focusParcelId = satParcelFocusSelect.value;
+  renderResultsForFocus();
   renderSatelliteMap();
 });
 
@@ -2092,7 +1989,7 @@ function renderSatelliteMap() {
     map: state.satMap,
     mapEl,
     layers: state.satMapLayers,
-    focusParcelId: state.satFocusParcelId,
+    focusParcelId: state.focusParcelId,
     fillOpacity: state.satOpacity,
   });
 }
@@ -2142,10 +2039,9 @@ function ensureMapLegend(mapEl) {
 }
 
 // Dessine les polygones de parcelle(s) (+ bornes, côtés, étiquette de
-// superficie) sur une instance Leaflet donnée. Factorisé pour être partagé
-// entre la carte de synthèse (panel 3) et la fenêtre dédiée de visualisation
-// satellite (panel 3bis), qui n'ont pas la même instance de carte ni le même
-// jeu de calques mais la même symbologie.
+// superficie) sur l'instance Leaflet de la carte satellite. Reste une
+// fonction séparée (plutôt qu'inline) pour permettre, si besoin un jour,
+// de la réutiliser sur une autre carte avec la même symbologie.
 function drawParcelsOnMap({ map, mapEl, layers, focusParcelId, fillOpacity }) {
   layers.forEach((layer) => map.removeLayer(layer));
   layers.length = 0;
@@ -2248,21 +2144,6 @@ function drawParcelsOnMap({ map, mapEl, layers, focusParcelId, fillOpacity }) {
   }
 
   ensureMapLegend(mapEl);
-}
-
-function renderMap() {
-  const mapEl = $("map");
-  if (!state.map) {
-    state.map = L.map(mapEl, { scrollWheelZoom: true });
-    applyBasemap(state.map, "basemapLayer", "basemap");
-  }
-  drawParcelsOnMap({
-    map: state.map,
-    mapEl,
-    layers: state.mapLayers,
-    focusParcelId: state.focusParcelId,
-    fillOpacity: 0.22,
-  });
 }
 
 // =========================================================================
